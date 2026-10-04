@@ -11,8 +11,19 @@ Built with [Tauri 2](https://tauri.app) (Rust shell, native webview) and TypeScr
 | Model | Category | Interaction |
 | --- | --- | --- |
 | Particles & gravity | Particle physics | Drag to fling a body, Shift for a heavy one |
+| Orbits | Particle physics | Drag to launch a planet (with a trajectory preview), right-drag for a star |
+| Electric field | Particle physics | Click for + charge, right-click for -, drag to move, right-click a charge to delete |
+| Cloth | Mechanics | Drag to pull the fabric, right-drag to slice it |
+| Chaotic pendulums | Mechanics | Drag to aim, release to drop every pendulum |
+| Ripple tank | Waves & fluids | Hold for a wave source, right-drag to draw walls |
+| Ink in water | Waves & fluids | Drag to stir in dye, right-drag to stir without dye |
 | Flocking (boids) | Algorithmic | Hold to attract, right-click or Shift to scatter |
 | Game of Life | Algorithmic | Click or drag to draw cells |
+| Reaction–diffusion | Algorithmic | Drag to seed chemical, right-drag to wipe |
+| Falling sand | Algorithmic | Drag to pour sand, water, plants, fire or lava; right-drag erases |
+| Slime mould | Algorithmic | Drag to drop food, right-drag to wipe trails |
+
+Shift works in place of right-click everywhere. Many models have preset dropdowns (slit experiments, reaction patterns, brush materials, colour schemes).
 
 Keyboard: `Space` play/pause, `R` reset, `.` single step while paused.
 
@@ -118,7 +129,7 @@ Every model implements `SimulationModel` from [`src/models/types.ts`](src/models
 
 2. Add it to the list in [`src/models/registry.ts`](src/models/registry.ts).
 
-Sliders and checkboxes are generated from `params` automatically. Mark a param `resetOnChange: true` if changing it should rebuild the simulation (e.g. a particle count).
+Sliders, checkboxes and dropdowns (`kind: "choice"`) are generated from `params` automatically. Mark a param `resetOnChange: true` if changing it should rebuild the simulation (e.g. a particle count).
 
 ## Project layout
 
@@ -129,8 +140,18 @@ src/
     types.ts         the model interface
     registry.ts      list of available models
     particles.ts     n-body gravity + collisions
+    orbits.ts        stars and planets (leapfrog integrator)
+    charges.ts       electric field, potential and field lines
+    cloth.ts         Verlet cloth with tearing
+    pendulum.ts      fan of chaotic double pendulums (RK4)
+    waves.ts         ripple tank (2D wave equation)
+    fluid.ts         stable fluids with dye
     boids.ts         flocking
     life.ts          Conway's Game of Life
+    reaction.ts      Gray-Scott reaction-diffusion
+    sand.ts          falling-sand cellular automaton
+    slime.ts         Physarum slime mould agents
+    lib/raster.ts    pixel buffer + palettes for grid models
   ui/controls.ts     builds parameter controls from a model's spec
 src-tauri/           Rust/Tauri desktop shell and bundle config
 ```
