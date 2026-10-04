@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Physics Playground</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header>
+          <h1>Physics Playground</h1>
+        </header>
+        <section>
+          <label class="section-label" for="model-select">Model</label>
+          <select id="model-select"></select>
+          <p id="model-description" class="muted"></p>
+        </section>
+        <section class="transport">
+          <button id="play-pause" type="button">Pause</button>
+          <button id="step" type="button">Step</button>
+          <button id="reset" type="button">Reset</button>
+        </section>
+        <section>
+          <div class="section-label">Parameters</div>
+          <div id="params"></div>
+        </section>
+        <section>
+          <div class="section-label">Interaction</div>
+          <p id="model-hint" class="muted"></p>
+        </section>
+        <footer class="muted" id="stats"></footer>
+      </aside>
+      <main id="stage">
+        <canvas id="canvas"></canvas>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
