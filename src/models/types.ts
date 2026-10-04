@@ -25,9 +25,18 @@ export type ParamSpec =
       label: string;
       default: boolean;
       resetOnChange?: boolean;
+    }
+  | {
+      /** A dropdown of named options, e.g. a preset or a brush material. */
+      kind: "choice";
+      key: string;
+      label: string;
+      options: { value: string; label: string }[];
+      default: string;
+      resetOnChange?: boolean;
     };
 
-export type ParamValues = Record<string, number | boolean>;
+export type ParamValues = Record<string, number | boolean | string>;
 
 export interface Viewport {
   width: number;
@@ -63,7 +72,7 @@ export interface SimulationModel {
 export interface ModelDefinition {
   id: string;
   name: string;
-  category: "Particle physics" | "Algorithmic" | "Custom";
+  category: "Particle physics" | "Mechanics" | "Waves & fluids" | "Algorithmic" | "Custom";
   description: string;
   /** One line telling the user how to interact with the canvas. */
   hint?: string;

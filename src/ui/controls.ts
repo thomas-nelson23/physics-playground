@@ -1,7 +1,7 @@
 import type { ParamSpec, ParamValues } from "../models/types";
 
 /**
- * Builds sliders and checkboxes from a model's parameter specs. `onChange`
+ * Builds sliders, checkboxes and dropdowns from a model's parameter specs. `onChange`
  * receives the spec that changed so the host can decide whether to reset.
  */
 export function renderParamControls(
@@ -45,6 +45,26 @@ export function renderParamControls(
       // count, so reset-triggering params apply when the drag ends.
       input.addEventListener("change", () => {
         if (spec.resetOnChange) onChange(spec);
+      });
+      row.append(label, input);
+    } else if (spec.kind === "choice") {
+      const label = document.createElement("label");
+      label.htmlFor = id;
+      label.textContent = spec.label;
+      const input = document.createElement("select");
+      input.id = id;
+      for (const o of spec.options) {
+        const opt = document.createElement("option");
+        opt.value = o.value;
+        opt.textContent = o.label;
+        input.append(opt);
+      }
+      input.value = String(values[spec.key]);
+      input.addEventListener("change", () => {
+        values[spec.key] = input.value;
+        onChange(spec);
+        // Hand the keyboard back so Space / R keep driving the simulation.
+        input.blur();
       });
       row.append(label, input);
     } else {
