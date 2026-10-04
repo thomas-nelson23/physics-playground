@@ -1,0 +1,56 @@
+# Builds Physics Playground from this checkout and installs it as a pacman package.
+#   cd packaging/arch && makepkg -si
+# Works on Arch and Arch-based distros (CachyOS, EndeavourOS, Manjaro, ...).
+
+pkgname=physics-playground
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Interactive physics and algorithm visualizer"
+arch=('x86_64' 'aarch64')
+url="https://github.com/thomas-nelson23/physics-playground"
+license=('custom')
+depends=('webkit2gtk-4.1' 'gtk3' 'glib2' 'cairo' 'pango' 'gdk-pixbuf2' 'libsoup3' 'hicolor-icon-theme')
+makedepends=('cargo' 'nodejs' 'npm' 'git')
+# makepkg's LTO flags break Rust/C mixed builds; debug split adds nothing here
+options=('!lto' '!debug')
+source=()
+
+# The repo this PKGBUILD lives in
+_repo="$(realpath "$startdir/../..")"
+
+prepare() {
+  rm -rf "$srcdir/$pkgname"
+  mkdir -p "$srcdir/$pkgname"
+  # Copy the committed tree only, so local node_modules/target don't leak in
+  git -C "$_repo" archive --format=tar HEAD | tar -x -C "$srcdir/$pkgname"
+}
+
+build() {
+  cd "$srcdir/$pkgname"
+  export CARGO_TARGET_DIR="$srcdir/$pkgname/src-tauri/target"
+  npm ci
+  # Binary only; the package() step lays out the files pacman installs
+  npx tauri build --no-bundle
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+  install -Dm755 "src-tauri/target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/$pkgname.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Physics Playground
+Comment=$pkgdesc
+Exec=$pkgname
+Icon=$pkgname
+Terminal=false
+Categories=Education;Science;Physics;
+DESKTOP
+
+  install -Dm644 src-tauri/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/$pkgname.png"
+  install -Dm644 src-tauri/icons/64x64.png "$pkgdir/usr/share/icons/hicolor/64x64/apps/$pkgname.png"
+  install -Dm644 src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/$pkgname.png"
+  install -Dm644 src-tauri/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/$pkgname.png"
+  install -Dm644 src-tauri/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/$pkgname.png"
+}

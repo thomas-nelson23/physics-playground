@@ -4,7 +4,7 @@ An interactive desktop app for exploring physics and algorithmic models on a liv
 
 ![Boids model](docs/screenshot.png)
 
-Built with [Tauri 2](https://tauri.app) (Rust shell, native webview) and TypeScript + Canvas 2D. macOS is the first target; Linux builds from the same code (`.deb` and AppImage).
+Built with [Tauri 2](https://tauri.app) (Rust shell, native webview) and TypeScript + Canvas 2D. macOS is the first target; Linux builds from the same code (`.deb`, AppImage, and a pacman package for Arch-based distros like CachyOS).
 
 ## Models
 
@@ -35,8 +35,59 @@ npm run tauri build   # macOS: .app + .dmg   Linux: .deb + .AppImage
 On Linux, install the webview deps first:
 
 ```sh
+# Debian / Ubuntu
 sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+# Arch / CachyOS / EndeavourOS / Manjaro
+sudo pacman -S --needed base-devel webkit2gtk-4.1 librsvg rust nodejs npm
 ```
+
+## Installing on Arch-based distros (CachyOS, EndeavourOS, Manjaro)
+
+### Build a pacman package (recommended)
+
+The repo ships a [`PKGBUILD`](packaging/arch/PKGBUILD) that builds the app from your checkout and installs it like any other package, with a launcher entry and icon.
+
+```sh
+sudo pacman -S --needed base-devel git
+git clone https://github.com/thomas-nelson23/physics-playground.git
+cd physics-playground/packaging/arch
+makepkg -si
+```
+
+`makepkg -s` pulls in everything it needs (Rust, Node, `webkit2gtk-4.1`). If you already use `rustup`, that works too. Then launch **Physics Playground** from your app menu, or run `physics-playground`.
+
+- Update: `git pull`, then `makepkg -sif` in `packaging/arch`.
+- Uninstall: `sudo pacman -R physics-playground`.
+
+The repo is private, so `git clone` needs you signed in to GitHub (for example `gh auth login`, or clone over SSH).
+
+### Download a prebuilt package
+
+Every push to `main` builds an Arch package in CI.
+
+1. Open the repo's **Actions** tab, pick the latest **Build** run on `main`, and download the `physics-playground-arch` artifact.
+2. Unzip it and install:
+
+   ```sh
+   sudo pacman -U physics-playground-*.pkg.tar.zst
+   ```
+
+### AppImage (no install)
+
+The `physics-playground-Linux` artifact from the same run contains an AppImage that runs without installing anything. It needs FUSE 2:
+
+```sh
+sudo pacman -S --needed fuse2
+chmod +x Physics*.AppImage
+./Physics*.AppImage
+```
+
+The AppImage is built on Ubuntu and bundles its own libraries, so the pacman package is the better fit on Arch.
+
+### Troubleshooting
+
+- **Blank or white window, or a crash on start (common with NVIDIA drivers):** run with `WEBKIT_DISABLE_DMABUF_RENDERER=1 physics-playground`. To make it stick, add `export WEBKIT_DISABLE_DMABUF_RENDERER=1` to your shell profile.
 
 ## Adding a model
 
