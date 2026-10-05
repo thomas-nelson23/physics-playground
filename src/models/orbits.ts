@@ -1,6 +1,7 @@
-import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, MusicFrame, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { noteHue } from "./lib/music";
 import { gravityAt, gravityModeParam } from "./lib/gravity";
+import { Feedback, applyFeedback, feedbackParams, glowSprite } from "./lib/visual";
 
 interface Body {
   x: number;
@@ -12,6 +13,10 @@ interface Body {
   r: number;
   star: boolean;
   hue: number;
+  /** Pitch class 0..11: the planet rings out whenever the melody plays this note. */
+  pc: number;
+  /** Brightness boost from hits, fading back to 0. */
+  glow: number;
   trail: Float32Array;
   trailHead: number;
   trailLen: number;
@@ -30,9 +35,10 @@ const EDGE_K = 60;
 const EDGE_C = 6;
 
 /**
- * A planetary system: heavy stars and light planets under Newtonian
- * gravity, integrated with a symplectic (leapfrog) scheme so orbits stay
- * closed over long runs. Planets that hit a star are swallowed.
+ * A planetary system drawn as a light show: planets under Newtonian gravity
+ * (leapfrog, so orbits stay closed) trace glowing rings, each planet is tuned
+ * to a note and flares whenever the melody plays it, and the sun's corona is
+ * the live waveform. Planets that hit a star are swallowed.
  */
 class OrbitsSim implements SimulationModel {
   private bodies: Body[] = [];
@@ -43,6 +49,12 @@ class OrbitsSim implements SimulationModel {
   private time = 0;
   private fieldMode = "off";
   private fieldG = 0;
+  private fb = new Feedback();
+  private stepped = false;
+  /** Snare flash for the constellation lines between neighbouring planets. */
+  private links = 0;
+  private sunSwell = 0;
+  private ripples: { x: number; y: number; r: number; life: number }[] = [];
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -81,6 +93,8 @@ class OrbitsSim implements SimulationModel {
       x, y, vx, vy, gm, star,
       r: star ? 10 + Math.sqrt(gm / BASE_GM) * 6 : 2.5 + Math.random() * 2.5,
       hue: star ? 45 : Math.random() * 360,
+      pc: Math.floor(Math.random() * 12),
+      glow: 0,
       trail: new Float32Array(TRAIL_MAX * 2),
       trailHead: 0,
       trailLen: 0,
@@ -146,7 +160,14 @@ class OrbitsSim implements SimulationModel {
     }
   }
 
-  step(dt: number, p: ParamValues): void {
+  step(dt: number, p: ParamValues, m: MusicFrame): void {
+    this.stepped = true;
+    for (const b of this.bodies) b.glow *= Math.exp(-dt * 3);
+    this.links *= Math.exp(-dt * 4);
+    for (const r of this.ripples) { r.r += dt * 500; r.life -= dt * 1.1; }
+    this.ripples = this.ripples.filter((r) => r.life > 0);
+    // The sun swells with the bass.
+    this.sunSwell = Math.min(1.5, m.bass);
     const ts = p.timeScale as number;
     // Keep the substep no longer than at time scale 1 (up to a cap), so fast-forward stays accurate.
     const substeps = Math.min(MAX_SUBSTEPS, Math.max(SUBSTEPS, Math.ceil(SUBSTEPS * ts)));
@@ -221,12 +242,24 @@ class OrbitsSim implements SimulationModel {
   }
 
   onNote(ev: NoteEvent): void {
-    if (ev.role !== "tone") {
-      // Drums make the stars pulse.
-      this.pulse = Math.max(this.pulse, ev.velocity * (ev.role === "hat" ? 0.4 : 1));
+    if (ev.role === "kick") {
+      this.pulse = Math.max(this.pulse, ev.velocity);
+      for (const b of this.bodies) if (b.star) this.ripples.push({ x: b.x, y: b.y, r: b.r, life: ev.velocity });
       return;
     }
-    // A note births a planet on a circular orbit: low notes far out, high notes close in.
+    if (ev.role === "snare") {
+      this.links = Math.max(this.links, ev.velocity);
+      return;
+    }
+    if (ev.role === "hat") {
+      const planets = this.bodies.filter((b) => !b.star);
+      for (let k = 0; k < 4 && planets.length; k++) planets[Math.floor(Math.random() * planets.length)].glow = ev.velocity * 0.8;
+      return;
+    }
+    // Every planet tuned to this note rings out...
+    const pc = ((ev.note % 12) + 12) % 12;
+    for (const b of this.bodies) if (!b.star && b.pc === pc) b.glow = Math.max(b.glow, ev.velocity);
+    // ...and a new one is born: low notes far out, high notes close in.
     const star = this.bodies.find((b) => b.star);
     if (!star) return;
     const span = Math.min(this.view.width, this.view.height) * 0.45;
@@ -237,6 +270,8 @@ class OrbitsSim implements SimulationModel {
     planet.vx += star.vx;
     planet.vy += star.vy;
     planet.hue = noteHue(ev.note);
+    planet.pc = pc;
+    planet.glow = ev.velocity;
     planet.r = 2.5 + ev.velocity * 3;
     const planets = this.bodies.filter((b) => !b.star);
     if (planets.length > 260) this.bodies.splice(this.bodies.indexOf(planets[0]), 1);
@@ -267,13 +302,23 @@ class OrbitsSim implements SimulationModel {
     return pts;
   }
 
-  render(g: CanvasRenderingContext2D): void {
+  render(g: CanvasRenderingContext2D, view: Viewport, p: ParamValues, m: MusicFrame): void {
+    applyFeedback(this.fb, g, view, p, this.stepped);
+    this.stepped = false;
     this.pulse *= 0.9;
+    g.globalCompositeOperation = "lighter";
+    const span = Math.min(view.width, view.height) * 0.45;
+    const star0 = this.bodies.find((b) => b.star);
+    const spec = m.spectrum;
+    const bright = 0.35 + Math.min(1, m.level) * 0.4;
+
     // Trails fade from transparent (oldest) to solid (newest) in a few bands.
     const bands = 4;
+    g.lineWidth = p.trailWidth as number;
     for (const b of this.bodies) {
       const n = b.trailLen;
       if (n < 2) continue;
+      const lift = Math.min(1, b.glow);
       for (let k = 0; k < bands; k++) {
         const from = Math.floor((k * (n - 1)) / bands), to = Math.floor(((k + 1) * (n - 1)) / bands);
         g.beginPath();
@@ -282,28 +327,55 @@ class OrbitsSim implements SimulationModel {
           if (i === from) g.moveTo(b.trail[idx], b.trail[idx + 1]);
           else g.lineTo(b.trail[idx], b.trail[idx + 1]);
         }
-        g.strokeStyle = `hsla(${b.hue} 80% 65% / ${((k + 1) / bands) * 0.55})`;
+        g.strokeStyle = `hsla(${b.hue} 85% ${60 + lift * 25}% / ${((k + 1) / bands) * (bright + lift * 0.5)})`;
         g.stroke();
       }
     }
+    g.lineWidth = 1;
+
+    // Snares flash constellation lines between each planet and its nearest neighbour.
+    if (this.links > 0.03) {
+      const planets = this.bodies.filter((b) => !b.star);
+      g.beginPath();
+      for (const a of planets) {
+        let best: Body | null = null, bd = Infinity;
+        for (const b of planets) {
+          if (a === b) continue;
+          const d = (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+          if (d < bd) { bd = d; best = b; }
+        }
+        if (best && bd < (span * 0.5) ** 2) { g.moveTo(a.x, a.y); g.lineTo(best.x, best.y); }
+      }
+      g.strokeStyle = `rgba(200,220,255,${this.links * 0.7})`;
+      g.stroke();
+    }
+
+    for (const r of this.ripples) {
+      g.beginPath();
+      g.arc(r.x, r.y, r.r, 0, Math.PI * 2);
+      g.lineWidth = 1 + r.life * 4;
+      g.strokeStyle = `rgba(255,190,110,${r.life * 0.5})`;
+      g.stroke();
+    }
+    g.lineWidth = 1;
 
     for (const b of this.bodies) {
       if (b.star) {
-        const R = b.r * (3 + this.pulse * 3);
-        const glow = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, R);
-        glow.addColorStop(0, "rgba(255,220,140,0.9)");
-        glow.addColorStop(0.35, "rgba(255,170,60,0.35)");
-        glow.addColorStop(1, "rgba(255,140,40,0)");
-        g.fillStyle = glow;
-        g.beginPath();
-        g.arc(b.x, b.y, R, 0, Math.PI * 2);
-        g.fill();
+        this.drawSun(g, b, m);
+        continue;
       }
-      g.beginPath();
-      g.arc(b.x, b.y, b.r, 0, Math.PI * 2);
-      g.fillStyle = b.star ? "hsl(45 100% 80%)" : `hsl(${b.hue} 75% 65%)`;
-      g.fill();
+      // Planets light up with the part of the spectrum their orbit stands for: outer orbits are bass, inner are treble.
+      let level = 0;
+      if (star0) {
+        const t = 1 - Math.min(1, Math.hypot(b.x - star0.x, b.y - star0.y) / span);
+        level = spec[Math.min(spec.length - 1, Math.floor(t * spec.length))];
+      }
+      const s = b.r * (2.2 + level * 3 + b.glow * 5) * (p.planetGlow as number);
+      g.globalAlpha = Math.min(1, 0.55 + level * 0.5 + b.glow);
+      g.drawImage(glowSprite(b.hue), b.x - s, b.y - s, s * 2, s * 2);
+      g.globalAlpha = 1;
     }
+    g.globalCompositeOperation = "source-over";
 
     const path = this.predict();
     if (path.length > 2) {
@@ -317,6 +389,40 @@ class OrbitsSim implements SimulationModel {
     }
   }
 
+  /** A sun whose corona traces the live waveform and swells with the bass and kicks. */
+  private drawSun(g: CanvasRenderingContext2D, b: Body, m: MusicFrame): void {
+    const swell = 1 + this.sunSwell * 0.6 + this.pulse * 0.8;
+    const R = b.r * 3 * swell;
+    const glow = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, R * 1.6);
+    glow.addColorStop(0, "rgba(255,230,160,0.95)");
+    glow.addColorStop(0.3, "rgba(255,170,60,0.4)");
+    glow.addColorStop(1, "rgba(255,120,40,0)");
+    g.fillStyle = glow;
+    g.beginPath();
+    g.arc(b.x, b.y, R * 1.6, 0, Math.PI * 2);
+    g.fill();
+    // The corona: the waveform wrapped round the sun.
+    const wave = m.wave;
+    const n = wave.length;
+    const cr = b.r * 2.2 * swell;
+    g.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const r = cr * (1 + wave[i % n] * 0.9);
+      const px = b.x + Math.cos(a) * r, py = b.y + Math.sin(a) * r;
+      if (i === 0) g.moveTo(px, py);
+      else g.lineTo(px, py);
+    }
+    g.lineWidth = 1.5;
+    g.strokeStyle = `rgba(255,200,120,${0.35 + Math.min(1, m.level) * 0.5})`;
+    g.stroke();
+    g.lineWidth = 1;
+    g.beginPath();
+    g.arc(b.x, b.y, b.r * (1 + this.pulse * 0.3), 0, Math.PI * 2);
+    g.fillStyle = "hsl(45 100% 85%)";
+    g.fill();
+  }
+
   stats(): string {
     const stars = this.bodies.filter((b) => b.star).length;
     return `${stars} star${stars === 1 ? "" : "s"} · ${this.bodies.length - stars} planets · ${this.swallowed} swallowed`;
@@ -325,19 +431,20 @@ class OrbitsSim implements SimulationModel {
 
 export const orbits: ModelDefinition = {
   id: "orbits",
-  name: "Orbits",
-  category: "Particle physics",
-  description: "Planets orbiting stars under Newtonian gravity, with trails. A dashed line previews where a launch will go. An optional gravity field can drag the whole system around.",
-  hint: "Drag to launch a planet (the drag sets its velocity). Right-drag or Shift-drag launches a new star. Each note adds a planet, low notes on outer orbits.",
+  name: "Orbit rings",
+  category: "Particles",
+  description: "Planets trace glowing rings round a sun whose corona is the live waveform. Each planet is tuned to a note and flares when the melody plays it, and orbits light up with their slice of the spectrum: outer rings are bass, inner rings treble.",
+  hint: "Drag to launch a planet (the drag sets its velocity). Right-drag or Shift-drag launches a new star. Each melody note adds a planet in its colour, low notes on outer orbits.",
   fixedDt: 1 / 60,
+  paintsBackground: true,
   params: [
     {
-      kind: "number", key: "timeScale", label: "Time scale", min: 0.05, max: 6, step: 0.05, default: 1, group: "Simulation",
-      description: "How fast time runs. High values whip planets round; low values slow everything to a crawl.",
+      kind: "number", key: "timeScale", label: "Time scale", min: 0.05, max: 6, step: 0.05, default: 1, group: "Motion",
+      description: "How fast the planets go round. High values whip them into spirograph blurs.",
     },
     {
       kind: "boolean", key: "mutual", label: "Planets attract each other", default: false, group: "Gravity",
-      description: "Planets tug on each other as well as the stars, so orbits wobble and drift.",
+      description: "Planets tug on each other as well as the stars, so the rings wobble and drift.",
     },
     gravityModeParam("off", undefined, {
       description: "Drags whole systems around: stars and their planets move together, cushioned at the edges.",
@@ -347,9 +454,18 @@ export const orbits: ModelDefinition = {
       description: "How hard the outside field drags the systems. Strong fields sling stars across the screen.",
     },
     {
-      kind: "number", key: "trail", label: "Trail length", min: 0, max: TRAIL_MAX, step: 10, default: 200, group: "Look",
-      description: "How long a tail each body leaves. Long trails draw the full orbit shapes.",
+      kind: "number", key: "trail", label: "Trail length", min: 0, max: TRAIL_MAX, step: 10, default: 260, group: "Look",
+      description: "How long a glowing tail each planet leaves. Long trails draw whole rings.",
     },
+    {
+      kind: "number", key: "trailWidth", label: "Trail width", min: 0.5, max: 8, step: 0.1, default: 1.4, group: "Look",
+      description: "How thick the trails are. Thick trails overlap into bands of light.",
+    },
+    {
+      kind: "number", key: "planetGlow", label: "Planet glow", min: 0.3, max: 4, step: 0.05, default: 1, group: "Look",
+      description: "How big each planet's glow is.",
+    },
+    ...feedbackParams(0.6, 0, 0),
     {
       kind: "choice", key: "system", label: "System", default: "planets", resetOnChange: true, group: "Setup",
       description: "Which system to start with. Changing it restarts the scene.",
@@ -360,7 +476,7 @@ export const orbits: ModelDefinition = {
       ],
     },
     {
-      kind: "number", key: "planets", label: "Planets", min: 0, max: 300, step: 1, default: 40, resetOnChange: true, group: "Setup",
+      kind: "number", key: "planets", label: "Planets", min: 0, max: 300, step: 1, default: 60, resetOnChange: true, group: "Setup",
       description: "How many planets the system starts with.",
     },
     {
@@ -369,20 +485,24 @@ export const orbits: ModelDefinition = {
     },
   ],
   macros: [
-    { key: "warp", label: "Time warp", targets: [{ param: "timeScale", amount: 0.6 }, { param: "trail", amount: 0.2 }] },
+    { key: "warp", label: "Time warp", targets: [{ param: "timeScale", amount: 0.6 }, { param: "trail", amount: 0.2 }, { param: "zoom", amount: 0.2 }] },
+    { key: "nebula", label: "Nebula", targets: [{ param: "afterglow", amount: 0.35 }, { param: "trailWidth", amount: 0.4 }, { param: "planetGlow", amount: 0.3 }, { param: "spin", amount: 0.1 }] },
     { key: "trails", label: "Long trails", targets: [{ param: "trail", amount: 0.9 }, { param: "timeScale", amount: 0.1 }] },
   ],
   modulations: [
-    { source: "kick", target: "timeScale", amount: 0.25 },
-    { source: "bass", target: "timeScale", amount: 0.2 },
-    { source: "lfoBar", target: "trail", amount: 0.4 },
-    { source: "snare", target: "fieldGravity", amount: 0.4 },
+    { source: "kick", target: "timeScale", amount: 0.2 },
+    { source: "bass", target: "trailWidth", amount: 0.2 },
+    { source: "lfoBar", target: "trail", amount: 0.3 },
+    { source: "treble", target: "planetGlow", amount: 0.2 },
   ],
   reactions: [
-    { role: "kick", text: "Makes the stars pulse" },
-    { role: "snare", text: "Makes the stars pulse" },
-    { role: "hat", text: "Makes the stars pulse gently" },
-    { role: "tone", text: "Adds a planet coloured by pitch; low notes on outer orbits" },
+    { source: "kick", text: "The sun flares and sends a ripple outward" },
+    { source: "snare", text: "Flashes constellation lines between neighbouring planets" },
+    { source: "hat", text: "A few planets twinkle" },
+    { source: "tone", text: "Planets tuned to the note flare, and a new one is born in its colour; low notes on outer orbits" },
+    { source: "bass", text: "The sun swells" },
+    { source: "spectrum", text: "Planets glow with their orbit's frequency; the sun's corona traces the waveform" },
+    { source: "level", text: "Trails brighten as the music gets louder" },
   ],
   create: () => new OrbitsSim(),
 };

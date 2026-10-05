@@ -1,6 +1,7 @@
-import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, MusicFrame, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { noteHash } from "./lib/music";
-import { Raster, palette } from "./lib/raster";
+import { Raster, hsl, palette } from "./lib/raster";
+import { hueToward } from "./lib/visual";
 
 /** Feed and kill rates for well-known Gray–Scott regimes. */
 const PRESETS: Record<string, [number, number]> = {
@@ -18,11 +19,18 @@ const PALETTES: Record<string, Uint32Array> = {
   bio: palette([[0, 6, 10, 8], [0.35, 30, 90, 40], [0.65, 150, 220, 80], [1, 240, 255, 200]]),
 };
 
+/** A palette built round one hue: black, deep hue, bright hue, then a lighter neighbouring hue at the core. */
+function huePalette(h: number): Uint32Array {
+  const deep = hsl(h, 0.85, 0.16), mid = hsl(h, 0.95, 0.45), edge = hsl((h + 35) % 360, 0.95, 0.62), core = hsl((h + 60) % 360, 0.9, 0.78);
+  return palette([[0, 4, 5, 8], [0.35, ...deep], [0.65, ...mid], [0.88, ...edge], [1, ...core]]);
+}
+
 /**
- * Gray–Scott reaction–diffusion: two chemicals diffuse at different rates
- * while one feeds on the other. Tiny changes to the feed and kill rates
- * produce spots, stripes, mazes and self-replicating cells, the same
- * mechanism Turing proposed for animal coat patterns.
+ * Living ink: Gray–Scott reaction–diffusion, where two diffusing chemicals
+ * grow coral, spots, mazes and dividing cells. Here the music tends the
+ * garden: loud frequencies feed growth in their column of the screen (bass
+ * on the left), notes seed blooms in their colour, kicks seed rings and
+ * flash the ink, snares wipe holes, and the whole palette follows the melody.
  */
 class ReactionSim implements SimulationModel {
   private w = 0;
@@ -37,6 +45,11 @@ class ReactionSim implements SimulationModel {
   private raster: Raster | null = null;
   private brush: { x: number; y: number; erase: boolean } | null = null;
   private steps = 0;
+  private colShift = new Float32Array(0);
+  private hue = 200;
+  private lutHue = -1;
+  private lut: Uint32Array = PALETTES.ocean;
+  private flash = 0;
 
   reset(view: Viewport, p: ParamValues): void {
     this.cell = p.cellSize as number;
@@ -89,7 +102,14 @@ class ReactionSim implements SimulationModel {
     }
   }
 
-  step(_dt: number, p: ParamValues): void {
+  step(dt: number, p: ParamValues, m: MusicFrame): void {
+    // Loud frequencies lower the kill rate in their column, so the pattern blooms where the music is.
+    if (this.colShift.length !== this.w) this.colShift = new Float32Array(this.w);
+    const grow = (p.spectrumGrowth as number) * 0.0025;
+    const spec = m.spectrum;
+    for (let x = 0; x < this.w; x++) this.colShift[x] = -spec[Math.min(spec.length - 1, Math.floor((x / this.w) * spec.length))] * grow;
+    this.flash = Math.max(this.flash * Math.exp(-dt * 5), m.kick * 0.5);
+    this.hue = hueToward(this.hue, m.hue, dt * 1.5);
     if (this.brush) this.paint(this.brush.x / this.cell, this.brush.y / this.cell, (p.brush as number) / this.cell, this.brush.erase);
     const iters = p.speed as number;
     const { w, h, feed, kill } = this;
@@ -112,7 +132,7 @@ class ReactionSim implements SimulationModel {
           const lapB = 0.2 * (b[up + x] + b[down + x] + b[mid + l] + b[mid + r])
             + 0.05 * (b[up + l] + b[up + r] + b[down + l] + b[down + r]) - b[i];
           const abb = a[i] * b[i] * b[i];
-          const f = Math.max(0, feed[i] + df), k = Math.max(0, kill[i] + dk);
+          const f = Math.max(0, feed[i] + df), k = Math.max(0, kill[i] + dk + this.colShift[x]);
           na[i] = a[i] + dA * lapA - abb + f * (1 - a[i]);
           nb[i] = b[i] + dB * lapB + abb - (k + f) * b[i];
         }
@@ -137,6 +157,9 @@ class ReactionSim implements SimulationModel {
     } else if (ev.role === "snare") {
       // Snares wipe a hole the pattern has to regrow into.
       this.paint(Math.random() * w, Math.random() * h, 4 + ev.velocity * 6, true);
+    } else if (ev.role === "hat") {
+      // A pinch of tiny seeds.
+      for (let k = 0; k < 3; k++) this.paint(Math.random() * w, Math.random() * h, 1 + ev.velocity, false);
     }
   }
 
@@ -146,18 +169,40 @@ class ReactionSim implements SimulationModel {
       : null;
   }
 
-  render(g: CanvasRenderingContext2D, _view: Viewport, p: ParamValues): void {
+  render(g: CanvasRenderingContext2D, _view: Viewport, p: ParamValues, m: MusicFrame): void {
     if (!this.raster) return;
-    const lut = PALETTES[p.palette as string] ?? PALETTES.ocean;
+    const scheme = p.palette as string;
+    let lut = PALETTES[scheme];
+    if (!lut) {
+      // "notes" follows the melody's colour; "rainbow" turns slowly with the beat.
+      const h = scheme === "rainbow" ? (m.beats * 12) % 360 : this.hue;
+      if (Math.abs(((h - this.lutHue + 540) % 360) - 180) > 2) { this.lut = huePalette(h); this.lutHue = h; }
+      lut = this.lut;
+    }
     const px = this.raster.pixels, { a, b } = this;
-    // Contrast stretches the a-b difference around the same midpoint as before.
+    // Contrast stretches the a-b difference around the same midpoint as before; kicks flash it brighter.
     const c = (p.contrast as number) || 1.6;
-    const off = 0.5 + (1.25 - 0.5) * (c / 1.6);
+    const off = 0.5 + (1.25 - 0.5) * (c / 1.6) + this.flash * 0.25;
     for (let i = 0; i < px.length; i++) {
       const v = Math.max(0, Math.min(1, (a[i] - b[i]) * -c + off));
       px[i] = lut[(v * 255) | 0];
     }
-    this.raster.draw(g, this.w * this.cell, this.h * this.cell, true);
+    const W = this.w * this.cell, H = this.h * this.cell;
+    this.raster.draw(g, W, H, true);
+    // A soft bloom over the top that swells with the bass.
+    const bloom = (p.bloom as number) * (0.25 + Math.min(1.5, m.bass) * 0.75);
+    if (bloom > 0.02) {
+      const s = 1.04 + Math.min(1.5, m.bass) * 0.04;
+      g.globalCompositeOperation = "lighter";
+      g.globalAlpha = Math.min(1, bloom * 0.22);
+      g.save();
+      g.translate(W / 2, H / 2);
+      g.scale(s, s);
+      this.raster.draw(g, W, H, true, -W / 2, -H / 2);
+      g.restore();
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = "source-over";
+    }
   }
 
   stats(): string {
@@ -167,24 +212,30 @@ class ReactionSim implements SimulationModel {
 
 export const reaction: ModelDefinition = {
   id: "reaction",
-  name: "Reaction–diffusion",
-  category: "Algorithmic",
-  description: "Gray–Scott chemistry: two diffusing chemicals grow coral, spots, mazes and dividing cells, like Turing's animal-skin patterns.",
-  hint: "Drag to drop chemical B and grow new patterns. Right-drag or Shift-drag to wipe an area clean. Notes seed new growth by pitch, kicks seed rings, snares wipe holes.",
+  name: "Living ink",
+  category: "Surfaces",
+  description: "Coral, spots and mazes that grow to the music (Gray–Scott chemistry). Loud frequencies make their column bloom, bass on the left and treble on the right; notes seed growth in their colour, kicks seed rings and flash the ink, and the palette follows the melody.",
+  hint: "Drag to seed new growth. Right-drag or Shift-drag to wipe an area clean.",
   fixedDt: 1 / 60,
   params: [
+    { kind: "number", key: "spectrumGrowth", label: "Spectrum growth", min: 0, max: 2, step: 0.05, default: 0.6, group: "Music",
+      description: "How much loud frequencies make their part of the screen grow. High values paint a living spectrogram." },
+    { kind: "number", key: "bloom", label: "Bass bloom", min: 0, max: 2, step: 0.05, default: 0.7, group: "Music",
+      description: "A soft glow over the ink that swells with the bass." },
     { kind: "number", key: "feedShift", label: "Feed shift", min: -0.02, max: 0.02, step: 0.0005, default: 0, group: "Behaviour",
       description: "Nudges how fast fresh chemical is fed in. Up floods with growth, down starves it." },
     { kind: "number", key: "killShift", label: "Kill shift", min: -0.008, max: 0.008, step: 0.0002, default: 0, group: "Behaviour",
       description: "Nudges how fast the pattern dies off. Down spreads blobs, up erodes into dots." },
     { kind: "number", key: "diffusion", label: "Pattern scale", min: 0.2, max: 1.05, step: 0.01, default: 1, group: "Behaviour",
       description: "How far the chemicals spread. Lower makes finer, tighter patterns." },
-    { kind: "number", key: "speed", label: "Steps per frame", min: 1, max: 32, step: 1, default: 8, group: "Behaviour",
+    { kind: "number", key: "speed", label: "Growth speed", min: 1, max: 32, step: 1, default: 10, group: "Behaviour",
       description: "How many reaction steps run each frame, i.e. how fast patterns grow." },
     {
-      kind: "choice", key: "palette", label: "Colours", default: "ocean", group: "Look",
-      description: "Colour scheme for the chemicals.",
+      kind: "choice", key: "palette", label: "Colours", default: "notes", group: "Look",
+      description: "Colour scheme for the ink. Follow the melody re-tints it with every note.",
       options: [
+        { value: "notes", label: "Follow the melody" },
+        { value: "rainbow", label: "Rainbow, cycling with the beat" },
         { value: "ocean", label: "Ocean" },
         { value: "ember", label: "Ember" },
         { value: "bio", label: "Bioluminescent" },
@@ -212,20 +263,22 @@ export const reaction: ModelDefinition = {
   ],
   macros: [
     { key: "grow", label: "Growth", targets: [{ param: "speed", amount: 0.8 }, { param: "contrast", amount: 0.2 }] },
-    { key: "bloom", label: "Bloom", targets: [{ param: "killShift", amount: -0.6 }, { param: "feedShift", amount: 0.3 }, { param: "contrast", amount: 0.3 }] },
+    { key: "bloom", label: "Bloom", targets: [{ param: "killShift", amount: -0.6 }, { param: "feedShift", amount: 0.3 }, { param: "bloom", amount: 0.4 }] },
     { key: "dissolve", label: "Dissolve", targets: [{ param: "killShift", amount: 0.6 }, { param: "feedShift", amount: -0.3 }, { param: "diffusion", amount: -0.5 }] },
   ],
   modulations: [
-    { source: "kick", target: "speed", amount: 0.5 },
-    { source: "snare", target: "killShift", amount: 0.3 },
-    { source: "tone", target: "feedShift", amount: 0.25 },
-    { source: "lfoBar", target: "diffusion", amount: -0.4 },
-    { source: "bass", target: "contrast", amount: 0.4 },
+    { source: "kick", target: "speed", amount: 0.4 },
+    { source: "snare", target: "killShift", amount: 0.25 },
+    { source: "tone", target: "feedShift", amount: 0.2 },
+    { source: "lfoBar", target: "diffusion", amount: -0.3 },
   ],
   reactions: [
-    { role: "tone", text: "Seeds a blob of growth, placed by pitch" },
-    { role: "kick", text: "Seeds a ring of growth around the centre" },
-    { role: "snare", text: "Wipes a random hole for the pattern to regrow into" },
+    { source: "tone", text: "Seeds a blob of growth, placed by pitch, and re-tints the ink" },
+    { source: "kick", text: "Seeds a ring of growth around the centre and flashes the ink" },
+    { source: "snare", text: "Wipes a random hole for the pattern to regrow into" },
+    { source: "hat", text: "Sprinkles tiny seeds" },
+    { source: "spectrum", text: "Loud frequencies make their column grow (Spectrum growth)" },
+    { source: "bass", text: "A glow over the ink swells (Bass bloom)" },
   ],
   create: () => new ReactionSim(),
 };

@@ -4,6 +4,8 @@ import type { AudioBands } from "./modulation";
 export type Waveform = "triangle" | "sawtooth" | "square" | "sine";
 
 const SILENT: AudioBands = { level: 0, bass: 0, mid: 0, treble: 0 };
+const SPECTRUM_BINS = 48;
+const WAVE_POINTS = 128;
 
 export function midiToHz(note: number): number {
   return 440 * 2 ** ((note - 69) / 12);
@@ -27,6 +29,10 @@ export class AudioEngine {
   private player: HTMLAudioElement | null = null;
   private playerSource: MediaElementAudioSourceNode | null = null;
   private smoothed: AudioBands = { ...SILENT };
+  /** Log-spaced spectrum of what's playing, 0..1 per bin, refreshed by `bands`. */
+  readonly spectrum = new Float32Array(SPECTRUM_BINS);
+  /** A downsampled waveform snapshot, -1..1, refreshed by `bands`. */
+  readonly scope = new Float32Array(WAVE_POINTS);
   private volume = 0.7;
 
   ensure(): AudioContext {
@@ -191,7 +197,25 @@ export class AudioEngine {
     for (const k of ["level", "bass", "mid", "treble"] as const) {
       s[k] = raw[k] > s[k] ? raw[k] : s[k] * 0.88 + raw[k] * 0.12;
     }
+    this.analyseShape(binHz);
     return s;
+  }
+
+  /** Fill `spectrum` (40 Hz..14 kHz, log-spaced) and `scope` from the analyser data just read. */
+  private analyseShape(binHz: number): void {
+    const n = this.spectrum.length;
+    const lo = Math.log(40), hi = Math.log(14000);
+    for (let i = 0; i < n; i++) {
+      const a = Math.max(1, Math.floor(Math.exp(lo + ((hi - lo) * i) / n) / binHz));
+      const b = Math.max(a, Math.min(this.freq.length - 1, Math.floor(Math.exp(lo + ((hi - lo) * (i + 1)) / n) / binHz)));
+      let sum = 0;
+      for (let k = a; k <= b; k++) sum += this.freq[k];
+      // Treble bins read quieter, so they get a gentle lift.
+      const v = Math.min(1, (sum / ((b - a + 1) * 255)) * (1.2 + (i / n) * 0.8));
+      this.spectrum[i] = v > this.spectrum[i] ? v : this.spectrum[i] * 0.85 + v * 0.15;
+    }
+    const step = this.wave.length / this.scope.length;
+    for (let i = 0; i < this.scope.length; i++) this.scope[i] = this.wave[Math.floor(i * step)];
   }
 }
 

@@ -1,306 +1,351 @@
-import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, MusicFrame, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { noteHue } from "./lib/music";
 import { gravityAt, gravityModeParam, isUniform, uniformDir } from "./lib/gravity";
+import { Feedback, applyFeedback, colourParam, feedbackParams, glowSprite, hueToward, schemeHue } from "./lib/visual";
 
-interface Body {
+/** Sparks thrown off by notes live this long, in seconds, at most. */
+const SPARK_LIFE = 2.2;
+const MAX_SPARKS = 2500;
+/** Coarse grid for mutual gravity: each particle feels every cell's mass instead of every other particle. */
+const MESH = 12;
+
+interface Shock {
   x: number;
   y: number;
-  vx: number;
-  vy: number;
-  m: number;
   r: number;
+  speed: number;
+  life: number;
   hue: number;
+  /** Velocity added per step to particles inside the front. */
+  punch: number;
 }
 
-const MAX_SPEED = 2500;
-
 /**
- * N-body gravity with elastic collisions and wall bounces, plus an optional
- * gravity field (a direction, or a pull toward the centre, corners or walls). O(n^2) pairwise
- * forces, which is fine for a few hundred bodies; a Barnes–Hut model can be
- * added later as a separate definition.
+ * A cloud of glowing particles held on a ring that breathes with the bass
+ * and bulges into the shape of the spectrum, so the ring reads as a radial
+ * equaliser made of light. Kicks blast shockwaves through it, snares and
+ * notes throw off coloured sparks.
  */
-class ParticleSim implements SimulationModel {
-  private bodies: Body[] = [];
+class ParticleBloom implements SimulationModel {
+  private n = 0;
+  private x = new Float32Array(0);
+  private y = new Float32Array(0);
+  private vx = new Float32Array(0);
+  private vy = new Float32Array(0);
+  private hue = new Float32Array(0);
+  /** Seconds left for sparks; -1 for the permanent cloud. */
+  private life = new Float32Array(0);
+  /** Brief extra brightness from hi-hats. */
+  private flare = new Float32Array(0);
+  private base = 0;
   private view: Viewport = { width: 1, height: 1 };
-  private drag: { x0: number; y0: number; x: number; y: number } | null = null;
-  private flash = 0;
+  private shocks: Shock[] = [];
+  private pointer: { x: number; y: number; repel: boolean } | null = null;
   private time = 0;
+  private stepped = false;
+  private fb = new Feedback();
+  private scheme = "notes";
+  private beats = 0;
+  private noteHueNow = 210;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
-    this.bodies = [];
-    const n = p.count as number;
-    for (let i = 0; i < n; i++) {
-      this.bodies.push(
-        this.makeBody(
-          Math.random() * view.width,
-          Math.random() * view.height,
-          (Math.random() - 0.5) * 40,
-          (Math.random() - 0.5) * 40,
-        ),
-      );
+    this.base = p.count as number;
+    const cap = this.base + MAX_SPARKS;
+    this.x = new Float32Array(cap);
+    this.y = new Float32Array(cap);
+    this.vx = new Float32Array(cap);
+    this.vy = new Float32Array(cap);
+    this.hue = new Float32Array(cap);
+    this.life = new Float32Array(cap);
+    this.flare = new Float32Array(cap);
+    this.n = this.base;
+    const cx = view.width / 2, cy = view.height / 2, R = this.ringRadius(p, 0);
+    for (let i = 0; i < this.base; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = R * (0.6 + Math.random() * 0.8);
+      this.x[i] = cx + Math.cos(a) * r;
+      this.y[i] = cy + Math.sin(a) * r;
+      this.vx[i] = -Math.sin(a) * 60;
+      this.vy[i] = Math.cos(a) * 60;
+      this.hue[i] = 200 + Math.random() * 60;
+      this.life[i] = -1;
     }
+    this.shocks = [];
   }
 
   resize(view: Viewport): void {
     this.view = view;
   }
 
-  private makeBody(x: number, y: number, vx: number, vy: number, m = 1 + Math.random() * 4): Body {
-    return { x, y, vx, vy, m, r: 2 + Math.sqrt(m) * 2, hue: 190 + Math.random() * 80 };
+  private ringRadius(p: ParamValues, bass: number): number {
+    return Math.min(this.view.width, this.view.height) * (p.ringSize as number) * (1 + bass * (p.breath as number));
   }
 
-  step(dt: number, p: ParamValues): void {
-    const G = p.gravity as number;
-    const soft = 25; // softening length^2 avoids singular forces at close range
-    const bodies = this.bodies;
-    const n = bodies.length;
-
-    const ax = new Float64Array(n);
-    const ay = new Float64Array(n);
-    if (G > 0) {
-      for (let i = 0; i < n; i++) {
-        const a = bodies[i];
-        for (let j = i + 1; j < n; j++) {
-          const b = bodies[j];
-          const dx = b.x - a.x;
-          const dy = b.y - a.y;
-          const d2 = dx * dx + dy * dy + soft;
-          const inv = G / (d2 * Math.sqrt(d2));
-          ax[i] += dx * inv * b.m;
-          ay[i] += dy * inv * b.m;
-          ax[j] -= dx * inv * a.m;
-          ay[j] -= dy * inv * a.m;
-        }
-      }
+  private spark(x: number, y: number, vx: number, vy: number, hue: number): void {
+    let i = this.n;
+    if (i >= this.x.length) {
+      // Full: recycle the oldest-looking spark (the one with least life left).
+      let best = this.base, low = Infinity;
+      for (let k = this.base; k < this.n; k += 7) if (this.life[k] < low) { low = this.life[k]; best = k; }
+      i = best;
+    } else {
+      this.n++;
     }
+    this.x[i] = x; this.y[i] = y; this.vx[i] = vx; this.vy[i] = vy;
+    this.hue[i] = hue;
+    this.life[i] = SPARK_LIFE * (0.5 + Math.random() * 0.5);
+    this.flare[i] = 1;
+  }
 
-    // The gravity field: a direction, or a pull toward a point / edge.
+  private burst(x: number, y: number, count: number, speed: number, hue: number, spread = 40): void {
+    for (let k = 0; k < count; k++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = speed * (0.3 + Math.random() * 0.7);
+      this.spark(x, y, Math.cos(a) * s, Math.sin(a) * s, hue + (Math.random() - 0.5) * spread);
+    }
+  }
+
+  step(dt: number, p: ParamValues, m: MusicFrame): void {
+    this.stepped = true;
     this.time += dt;
+    this.scheme = p.colours as string;
+    this.beats = m.beats;
+    this.noteHueNow = m.hue;
+    const { width: w, height: h } = this.view;
+    const cx = w / 2, cy = h / 2;
+    const R = this.ringRadius(p, Math.min(1.5, m.bass));
+    const ringK = (p.ringPull as number) * 4;
+    const shape = (p.spectrumPush as number) * R * 0.5;
+    const spec = m.spectrum;
+    const bins = spec.length;
     const mode = p.gravityMode as string;
     const fg = p.fieldGravity as number;
-    const { width: w, height: h } = this.view;
     const uniform = isUniform(mode);
     const [ux, uy] = uniformDir(mode, this.time);
-
     const damping = Math.max(0, 1 - (p.damping as number) * dt);
-    for (let i = 0; i < n; i++) {
-      const b = bodies[i];
-      let gx = ux * fg, gy = uy * fg;
-      if (!uniform) [gx, gy] = gravityAt(mode, fg, b.x, b.y, w, h, this.time, 60);
-      b.vx = (b.vx + (ax[i] + gx) * dt) * damping;
-      b.vy = (b.vy + (ay[i] + gy) * dt) * damping;
-      // A speed cap keeps close passes at extreme gravity from flinging bodies through each other.
-      const v2 = b.vx * b.vx + b.vy * b.vy;
-      if (v2 > MAX_SPEED * MAX_SPEED) {
-        const k = MAX_SPEED / Math.sqrt(v2);
-        b.vx *= k;
-        b.vy *= k;
+    const G = p.gravity as number;
+
+    // Mutual gravity on a coarse mesh: total mass and centroid per cell.
+    let mass: Float32Array | null = null, mx: Float32Array | null = null, my: Float32Array | null = null;
+    if (G > 0) {
+      mass = new Float32Array(MESH * MESH); mx = new Float32Array(MESH * MESH); my = new Float32Array(MESH * MESH);
+      for (let i = 0; i < this.n; i++) {
+        const gx = Math.min(MESH - 1, Math.max(0, Math.floor((this.x[i] / w) * MESH)));
+        const gy = Math.min(MESH - 1, Math.max(0, Math.floor((this.y[i] / h) * MESH)));
+        const c = gy * MESH + gx;
+        mass[c]++; mx[c] += this.x[i]; my[c] += this.y[i];
       }
-      b.x += b.vx * dt;
-      b.y += b.vy * dt;
+      for (let c = 0; c < mass.length; c++) if (mass[c] > 0) { mx[c] /= mass[c]; my[c] /= mass[c]; }
     }
 
-    if (p.collisions) this.collide(p.restitution as number);
-    if (p.walls) this.bounceWalls(p.restitution as number);
-    else this.wrap();
-  }
-
-  /** Without walls, bodies leaving one edge come back on the opposite one, so a field can't empty the screen. */
-  private wrap(): void {
-    const { width: w, height: h } = this.view;
-    for (const b of this.bodies) {
-      if (b.x < -b.r) b.x += w + 2 * b.r;
-      else if (b.x > w + b.r) b.x -= w + 2 * b.r;
-      if (b.y < -b.r) b.y += h + 2 * b.r;
-      else if (b.y > h + b.r) b.y -= h + 2 * b.r;
-    }
-  }
-
-  private collide(e: number): void {
-    const bodies = this.bodies;
-    for (let i = 0; i < bodies.length; i++) {
-      const a = bodies[i];
-      for (let j = i + 1; j < bodies.length; j++) {
-        const b = bodies[j];
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const minD = a.r + b.r;
-        const d2 = dx * dx + dy * dy;
-        if (d2 >= minD * minD || d2 === 0) continue;
-        const d = Math.sqrt(d2);
-        const nx = dx / d;
-        const ny = dy / d;
-        // Push apart in proportion to inverse mass.
-        const overlap = minD - d;
-        const total = a.m + b.m;
-        a.x -= nx * overlap * (b.m / total);
-        a.y -= ny * overlap * (b.m / total);
-        b.x += nx * overlap * (a.m / total);
-        b.y += ny * overlap * (a.m / total);
-        // Impulse along the contact normal.
-        const rel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
-        if (rel > 0) continue;
-        const jImp = (-(1 + e) * rel) / (1 / a.m + 1 / b.m);
-        a.vx -= (jImp * nx) / a.m;
-        a.vy -= (jImp * ny) / a.m;
-        b.vx += (jImp * nx) / b.m;
-        b.vy += (jImp * ny) / b.m;
+    const { x, y, vx, vy, life, flare, hue } = this;
+    for (let i = 0; i < this.n; i++) {
+      let ax = 0, ay = 0;
+      const dx = x[i] - cx, dy = y[i] - cy;
+      const r = Math.hypot(dx, dy) || 1;
+      if (life[i] < 0) {
+        // Spring toward the ring, pushed out where the spectrum is loud. Low notes sit at the
+        // bottom, mirrored left and right, so the ring reads like a round equaliser.
+        const ang = Math.atan2(dx, dy); // 0 pointing down
+        const t = Math.abs(ang) / Math.PI;
+        const target = R + spec[Math.min(bins - 1, Math.floor(t * bins))] * shape;
+        const pull = -ringK * (r - target);
+        ax += (dx / r) * pull;
+        ay += (dy / r) * pull;
       }
-    }
-  }
-
-  private bounceWalls(e: number): void {
-    const { width, height } = this.view;
-    for (const b of this.bodies) {
-      if (b.x < b.r) { b.x = b.r; b.vx = Math.abs(b.vx) * e; }
-      if (b.x > width - b.r) { b.x = width - b.r; b.vx = -Math.abs(b.vx) * e; }
-      if (b.y < b.r) { b.y = b.r; b.vy = Math.abs(b.vy) * e; }
-      if (b.y > height - b.r) { b.y = height - b.r; b.vy = -Math.abs(b.vy) * e; }
-    }
-  }
-
-  onPointer(input: PointerInput): void {
-    // Drag to fling a new body: the drag vector sets its velocity.
-    if (input.type === "down" && input.button === 0) {
-      this.drag = { x0: input.x, y0: input.y, x: input.x, y: input.y };
-    } else if (input.type === "move" && this.drag) {
-      this.drag.x = input.x;
-      this.drag.y = input.y;
-    } else if (input.type === "up" && this.drag) {
-      const { x0, y0, x, y } = this.drag;
-      const mass = input.shift ? 60 : 1 + Math.random() * 4;
-      this.bodies.push(this.makeBody(x0, y0, (x0 - x) * 2, (y0 - y) * 2, mass));
-      this.drag = null;
-    }
-  }
-
-  render(g: CanvasRenderingContext2D, _view: Viewport, p: ParamValues): void {
-    const light = 65 + this.flash * 20;
-    this.flash *= 0.9;
-    for (const b of this.bodies) {
-      g.beginPath();
-      g.arc(b.x, b.y, b.r, 0, Math.PI * 2);
-      g.fillStyle = `hsl(${b.hue} 80% ${light}%)`;
-      g.fill();
-      if (p.showVelocity) {
-        g.beginPath();
-        g.moveTo(b.x, b.y);
-        g.lineTo(b.x + b.vx * 0.2, b.y + b.vy * 0.2);
-        g.strokeStyle = "rgba(255,255,255,0.35)";
-        g.stroke();
+      if (fg > 0) {
+        if (uniform) { ax += ux * fg; ay += uy * fg; }
+        else {
+          const [gx, gy] = gravityAt(mode, fg, x[i], y[i], w, h, this.time, 60);
+          ax += gx; ay += gy;
+        }
+      }
+      if (mass) {
+        for (let c = 0; c < mass.length; c++) {
+          if (mass[c] === 0) continue;
+          const ex = mx![c] - x[i], ey = my![c] - y[i];
+          const d2 = ex * ex + ey * ey + 2500;
+          const f = (G * 500 * mass[c]) / (d2 * Math.sqrt(d2));
+          ax += ex * f; ay += ey * f;
+        }
+      }
+      if (this.pointer) {
+        const ex = this.pointer.x - x[i], ey = this.pointer.y - y[i];
+        const d = Math.hypot(ex, ey) + 20;
+        const f = (this.pointer.repel ? -1 : 1) * 90000 / d;
+        ax += (ex / d) * f; ay += (ey / d) * f;
+      }
+      vx[i] = (vx[i] + ax * dt) * damping;
+      vy[i] = (vy[i] + ay * dt) * damping;
+      x[i] += vx[i] * dt;
+      y[i] += vy[i] * dt;
+      flare[i] *= Math.exp(-dt * 6);
+      if (life[i] < 0) {
+        // The cloud slowly takes on the colour scheme, by angle round the ring.
+        const t = (Math.atan2(dy, dx) / Math.PI + 1) / 2;
+        hue[i] = hueToward(hue[i], schemeHue(this.scheme, t, m.hue, m.beats), dt * 1.5);
+        // Anything flung far off screen comes back onto the ring.
+        if (x[i] < -w * 0.5 || x[i] > w * 1.5 || y[i] < -h * 0.5 || y[i] > h * 1.5) {
+          const a = Math.random() * Math.PI * 2;
+          x[i] = cx + Math.cos(a) * R; y[i] = cy + Math.sin(a) * R;
+          vx[i] = 0; vy[i] = 0;
+        }
+      } else {
+        life[i] -= dt;
       }
     }
-    if (this.drag) {
-      const { x0, y0, x, y } = this.drag;
-      g.beginPath();
-      g.moveTo(x0, y0);
-      g.lineTo(x, y);
-      g.setLineDash([4, 4]);
-      g.strokeStyle = "rgba(255,255,255,0.6)";
-      g.stroke();
-      g.setLineDash([]);
+
+    // Drop dead sparks by swapping the last one in.
+    for (let i = this.base; i < this.n; i++) {
+      if (life[i] > 0) continue;
+      const j = --this.n;
+      x[i] = x[j]; y[i] = y[j]; vx[i] = vx[j]; vy[i] = vy[j]; hue[i] = hue[j]; life[i] = life[j]; flare[i] = flare[j];
+      i--;
     }
+
+    // Shockwaves expand and fade, pushing whatever they pass.
+    for (const s of this.shocks) {
+      const prev = s.r;
+      s.r += s.speed * dt;
+      s.life -= dt * 1.2;
+      // Applied each step the front passes a particle, so it stays small per step.
+      const push = s.punch * s.life;
+      for (let i = 0; i < this.n; i++) {
+        const dx = x[i] - s.x, dy = y[i] - s.y;
+        const d = Math.hypot(dx, dy) || 1;
+        if (d < prev || d > s.r) continue;
+        vx[i] += (dx / d) * push;
+        vy[i] += (dy / d) * push;
+      }
+    }
+    this.shocks = this.shocks.filter((s) => s.life > 0);
   }
 
   onNote(ev: NoteEvent, p: ParamValues): void {
     const { width: w, height: h } = this.view;
-    if (ev.role === "kick" || ev.role === "snare") {
-      // A shockwave from the centre (kick) or a random spot (snare).
-      const cx = ev.role === "kick" ? w / 2 : Math.random() * w;
-      const cy = ev.role === "kick" ? h / 2 : Math.random() * h;
-      const force = (ev.role === "kick" ? 260 : 140) * ev.velocity;
-      // The wave fades to nothing before the walls. A wave that reached them pushed bodies at the
-      // edges along the wall, away from the centre, beat after beat, until they all piled into the corners.
-      const reach = Math.min(w, h) * (ev.role === "kick" ? 0.5 : 0.35);
-      for (const b of this.bodies) {
-        const dx = b.x - cx, dy = b.y - cy;
-        const d = Math.hypot(dx, dy) + 30;
-        const fade = Math.max(0, 1 - d / reach);
-        if (fade === 0) continue;
-        const f = ((force * 120) / d) * fade * fade;
-        b.vx += (dx / d) * f;
-        b.vy += (dy / d) * f;
+    const cx = w / 2, cy = h / 2;
+    const sparks = p.sparks as number;
+    const punch = p.punch as number;
+    if (ev.role === "kick") {
+      this.shocks.push({ x: cx, y: cy, r: 0, speed: 900, punch: 90 * punch * ev.velocity, life: 1, hue: schemeHue(this.scheme, 0.2, this.noteHueNow, this.beats) });
+      if (this.shocks.length > 4) this.shocks.shift();
+    } else if (ev.role === "snare") {
+      const a = Math.random() * Math.PI * 2;
+      const R = this.ringRadius(p, 0);
+      const hue = schemeHue(this.scheme, Math.random(), this.noteHueNow, this.beats) + 180;
+      this.burst(cx + Math.cos(a) * R, cy + Math.sin(a) * R, Math.round(sparks * 1.5 * ev.velocity), 500 * punch, hue, 60);
+    } else if (ev.role === "hat") {
+      for (let k = 0; k < this.base * 0.08; k++) this.flare[Math.floor(Math.random() * this.base)] = ev.velocity;
+    } else {
+      // A fountain from the ring, at an angle set by pitch: low notes at the bottom, rising round both sides.
+      const R = this.ringRadius(p, 0);
+      const side = Math.random() < 0.5 ? -1 : 1;
+      const a = Math.PI / 2 - side * ev.x * Math.PI;
+      const ox = cx + Math.cos(a) * R, oy = cy + Math.sin(a) * R;
+      const hue = noteHue(ev.note);
+      const count = Math.round(sparks * (0.4 + ev.velocity));
+      for (let k = 0; k < count; k++) {
+        const spread = a + (Math.random() - 0.5) * 0.7;
+        const s = (200 + Math.random() * 350) * punch;
+        this.spark(ox, oy, Math.cos(spread) * s, Math.sin(spread) * s, hue + (Math.random() - 0.5) * 20);
       }
-      this.flash = Math.max(this.flash, ev.velocity);
-    } else if (ev.role === "tone") {
-      // Each note drops a body coloured by its pitch, from the top, across the width by pitch.
-      const body = this.makeBody(w * (0.08 + ev.x * 0.84), 10, (Math.random() - 0.5) * 40, 120 + ev.velocity * 260, 1 + ev.velocity * 5);
-      body.hue = noteHue(ev.note);
-      this.bodies.push(body);
-      const max = Math.max(20, (p.count as number) * 1.5);
-      if (this.bodies.length > max) this.bodies.splice(0, this.bodies.length - max);
     }
   }
 
+  onPointer(input: PointerInput, p: ParamValues): void {
+    if (input.type === "down" && input.button === 0 && !input.shift) {
+      this.burst(input.x, input.y, Math.max(10, p.sparks as number), 450, schemeHue(this.scheme, Math.random(), this.noteHueNow, this.beats));
+    }
+    this.pointer = input.pressed && input.type !== "up"
+      ? { x: input.x, y: input.y, repel: input.button === 2 || input.shift }
+      : null;
+  }
+
+  render(g: CanvasRenderingContext2D, view: Viewport, p: ParamValues, m: MusicFrame): void {
+    applyFeedback(this.fb, g, view, p, this.stepped);
+    this.stepped = false;
+    g.globalCompositeOperation = "lighter";
+    const size = (p.size as number) * (1 + Math.min(1.5, m.energy) * 0.35 + m.pulse * 0.15);
+    const { x, y, hue, life, flare } = this;
+    for (let i = 0; i < this.n; i++) {
+      const fade = life[i] < 0 ? 0.55 : Math.min(1, life[i] / (SPARK_LIFE * 0.4));
+      const s = size * (6 + flare[i] * 10) * (life[i] < 0 ? 1 : 0.8 + fade * 0.4);
+      g.globalAlpha = Math.min(1, fade + flare[i] * 0.5);
+      g.drawImage(glowSprite(hue[i]), x[i] - s, y[i] - s, s * 2, s * 2);
+    }
+    g.globalAlpha = 1;
+    for (const s of this.shocks) {
+      g.beginPath();
+      g.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      g.lineWidth = 2 + s.life * 6;
+      g.strokeStyle = `hsla(${s.hue} 90% 65% / ${s.life * 0.6})`;
+      g.stroke();
+    }
+    g.lineWidth = 1;
+    g.globalCompositeOperation = "source-over";
+  }
+
   stats(): string {
-    return `${this.bodies.length} bodies`;
+    return `${this.base} particles · ${this.n - this.base} sparks`;
   }
 }
 
 export const particles: ModelDefinition = {
   id: "particles",
-  name: "Particles & gravity",
-  category: "Particle physics",
-  description: "Bodies that attract each other, collide and bounce, inside a gravity field you can point down, at the centre, the corners or the walls.",
-  hint: "Drag on the canvas to fling a new body. Hold Shift for a heavy one. Notes drop bodies coloured by pitch; kicks and snares send out shockwaves.",
-  fixedDt: 1 / 120,
+  name: "Particle bloom",
+  category: "Particles",
+  description: "A ring of glowing particles that breathes with the bass and bulges into the shape of the spectrum, like a round equaliser made of light. Kicks send shockwaves through it; notes and snares throw off coloured sparks.",
+  hint: "Click to throw sparks; hold to pull the particles in. Right-drag or Shift-drag pushes them away. Start the sequencer or play a song to bring it to life.",
+  fixedDt: 1 / 60,
+  paintsBackground: true,
   params: [
-    {
-      kind: "number", key: "gravity", label: "Mutual gravity", min: 0, max: 6000, step: 10, default: 300, group: "Gravity",
-      description: "How strongly bodies pull on each other. High values collapse everything into clumps.",
-    },
-    gravityModeParam("center"),
-    {
-      kind: "number", key: "fieldGravity", label: "Field strength", min: 0, max: 1500, step: 10, default: 80, group: "Gravity",
-      description: "How hard the gravity field pulls. Low keeps a loose cloud; high packs bodies tight.",
-    },
-    {
-      kind: "number", key: "restitution", label: "Bounciness", min: 0, max: 1, step: 0.05, default: 0.85, group: "Motion",
-      description: "How much speed a body keeps after a bounce. 0 is dead clay, 1 is a superball.",
-    },
-    {
-      kind: "number", key: "damping", label: "Air drag", min: 0, max: 5, step: 0.05, default: 0.15, group: "Motion",
-      description: "Slows every body over time. Zero lets shockwaves keep everything flying forever.",
-    },
-    {
-      kind: "boolean", key: "collisions", label: "Collisions", default: true, group: "Motion",
-      description: "Bodies bump off each other instead of passing through.",
-    },
-    {
-      kind: "boolean", key: "walls", label: "Walls", default: true, group: "Motion",
-      description: "Bodies bounce off the edges. Off: they wrap round to the opposite side.",
-    },
-    {
-      kind: "boolean", key: "showVelocity", label: "Show velocity", default: false, group: "Look",
-      description: "Draws a line from each body showing where and how fast it is moving.",
-    },
-    {
-      kind: "number", key: "count", label: "Bodies", min: 0, max: 800, step: 10, default: 150, resetOnChange: true, group: "Setup",
-      description: "How many bodies the scene starts with. Changing it restarts the scene.",
-    },
+    { kind: "number", key: "ringSize", label: "Ring size", min: 0, max: 0.6, step: 0.01, default: 0.2, group: "Shape",
+      description: "How big the ring is, as a share of the screen. Zero gathers everything into one bright core." },
+    { kind: "number", key: "breath", label: "Bass breathing", min: 0, max: 3, step: 0.05, default: 0.5, group: "Shape",
+      description: "How much the ring swells with the bass. High values make it pump hard on every bass note." },
+    { kind: "number", key: "spectrumPush", label: "Spectrum shape", min: 0, max: 3, step: 0.05, default: 1, group: "Shape",
+      description: "How far loud frequencies push the ring out. Bass at the bottom, treble at the top." },
+    { kind: "number", key: "ringPull", label: "Ring pull", min: 0, max: 40, step: 0.5, default: 6, group: "Shape",
+      description: "How tightly particles cling to the ring. Low lets them drift into a loose cloud." },
+    gravityModeParam("swirl", undefined, { description: "An extra pull on every particle. Swirl spins the ring; Down pours it like a waterfall." }),
+    { kind: "number", key: "fieldGravity", label: "Field strength", min: 0, max: 1500, step: 10, default: 120, group: "Gravity",
+      description: "How hard the gravity field pulls. Strong swirl makes the ring race round." },
+    { kind: "number", key: "gravity", label: "Mutual gravity", min: 0, max: 3000, step: 10, default: 0, group: "Gravity",
+      description: "How strongly the particles pull on each other, clumping the ring into beads." },
+    { kind: "number", key: "punch", label: "Hit punch", min: 0, max: 4, step: 0.05, default: 1, group: "Music",
+      description: "How hard kicks blast the shockwave and how fast sparks fly." },
+    { kind: "number", key: "sparks", label: "Sparks per note", min: 0, max: 300, step: 5, default: 50, group: "Music",
+      description: "How many sparks each melody note or snare throws off." },
+    { kind: "number", key: "damping", label: "Air drag", min: 0, max: 6, step: 0.05, default: 1.2, group: "Motion",
+      description: "Slows everything down. Low keeps sparks flying across the whole screen." },
+    colourParam("notes"),
+    { kind: "number", key: "size", label: "Glow size", min: 0.2, max: 5, step: 0.05, default: 1, group: "Look",
+      description: "How big each particle's glow is. Big glows melt together into clouds of light." },
+    ...feedbackParams(0.82, 0, 0),
+    { kind: "number", key: "count", label: "Particles", min: 0, max: 5000, step: 50, default: 1400, resetOnChange: true, group: "Setup",
+      description: "How many particles make up the ring. Changing it restarts the scene." },
   ],
   macros: [
-    {
-      key: "attract", label: "Collapse",
-      targets: [{ param: "gravity", amount: 0.7 }, { param: "fieldGravity", amount: 0.3 }, { param: "damping", amount: 0.15 }],
-    },
-    {
-      key: "bounce", label: "Bounce",
-      targets: [{ param: "restitution", amount: 0.3 }, { param: "damping", amount: -0.1 }, { param: "gravity", amount: -0.05 }, { param: "fieldGravity", amount: 0.5 }],
-    },
+    { key: "hyper", label: "Hyperspace", targets: [{ param: "zoom", amount: 0.35 }, { param: "afterglow", amount: 0.12 }, { param: "fieldGravity", amount: 0.3 }] },
+    { key: "implode", label: "Implode", targets: [{ param: "ringSize", amount: -0.4 }, { param: "gravity", amount: 0.3 }, { param: "size", amount: 0.2 }] },
+    { key: "bloom", label: "Bloom", targets: [{ param: "size", amount: 0.3 }, { param: "breath", amount: 0.3 }, { param: "spectrumPush", amount: 0.3 }, { param: "spin", amount: 0.15 }] },
   ],
   modulations: [
-    { source: "kick", target: "gravity", amount: 0.3 },
-    { source: "snare", target: "fieldGravity", amount: 0.4 },
-    { source: "lfoBar", target: "fieldGravity", amount: 0.25 },
-    { source: "bass", target: "gravity", amount: 0.35 },
+    { source: "kick", target: "zoom", amount: 0.15 },
+    { source: "lfoBar", target: "spin", amount: 0.1 },
+    { source: "treble", target: "size", amount: 0.15 },
+    { source: "snare", target: "fieldGravity", amount: 0.25 },
   ],
   reactions: [
-    { role: "kick", text: "Shockwave out from the centre" },
-    { role: "snare", text: "Smaller shockwave from a random spot" },
-    { role: "tone", text: "Drops a body coloured by pitch, left to right by pitch" },
+    { source: "kick", text: "A glowing shockwave from the centre that blasts the ring outward" },
+    { source: "snare", text: "A burst of sparks from a random point on the ring" },
+    { source: "hat", text: "A scattering of particles flares bright" },
+    { source: "tone", text: "A fountain of sparks in the note's colour; low notes from the bottom of the ring" },
+    { source: "bass", text: "The ring swells and shrinks (Bass breathing)" },
+    { source: "spectrum", text: "Loud frequencies bulge the ring out (Spectrum shape)" },
+    { source: "level", text: "Loud passages make every glow bigger" },
+    { source: "beat", text: "Glows swell a little on each beat" },
   ],
-  create: () => new ParticleSim(),
+  create: () => new ParticleBloom(),
 };

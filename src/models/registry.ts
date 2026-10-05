@@ -12,10 +12,8 @@ import { chladni } from "./chladni";
  * groups by category in the order categories first appear here.
  */
 export const models: ModelDefinition[] = [
-  particles, orbits,
-  cloth,
-  boids, reaction,
-  chladni,
+  particles, orbits, boids,
+  cloth, reaction, chladni,
 ];
 
 export function findModel(id: string): ModelDefinition | undefined {
