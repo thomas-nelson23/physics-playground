@@ -1,4 +1,4 @@
-import type { ModRoute, ModelDefinition, NoteEvent, ParamSpec, ParamValues } from "../models/types";
+import type { ModRoute, ModelDefinition, NoteEvent, NoteRole, ParamSpec, ParamValues } from "../models/types";
 import { renderParamControls, type ParamControls } from "../ui/controls";
 import { AudioEngine, BeatDetector, type Waveform } from "./audio";
 import { dispatchMidi, openMidi, type MidiInputs } from "./midi";
@@ -16,12 +16,27 @@ interface GlobalSettings {
   /** CC number -> target: `macro#<slot>` (any model) or `<modelId>/<paramKey>`. */
   bindings: Record<string, string>;
   dockHidden: boolean;
+  /** Master switch: when off, no routes push and no notes reach the model. */
+  musicOn: boolean;
+  /** Scales every route on every model, 0..2. */
+  intensity: number;
 }
 
+/**
+ * Bump when models' default routes change enough that saved per-model
+ * settings should be replaced by the new defaults.
+ */
+const MODEL_SETTINGS_VERSION = 2;
+
 interface ModelSettings {
+  v: number;
   macros: Record<string, number>;
   routes: ModRoute[];
+  /** Note reactions switched off for this model. */
+  muted: NoteRole[];
 }
+
+const ROLE_LABELS: Record<NoteRole, string> = { kick: "Kick", snare: "Snare", hat: "Hi-hat", tone: "Melody notes" };
 
 function load<T>(key: string): T | null {
   try {
@@ -63,7 +78,7 @@ export class Studio {
 
   private def: ModelDefinition | null = null;
   private base: ParamValues = {};
-  private modelSettings: ModelSettings = { macros: {}, routes: [] };
+  private modelSettings: ModelSettings = { v: MODEL_SETTINGS_VERSION, macros: {}, routes: [], muted: [] };
   private macroOut: Record<string, number> = {};
   private paramControls: ParamControls | null = null;
   private macroControls: ParamControls | null = null;
@@ -75,12 +90,17 @@ export class Studio {
   private gridCells: HTMLElement[][] = [];
   private meterBars: Record<string, HTMLElement> = {};
   private lastStepShown = -2;
+  /** Live source bars in the matrix, refreshed while the Modulation tab is open. */
+  private sourceMeters: { bar: HTMLElement; source: () => string }[] = [];
+  /** Music that was playing when the simulation was paused, to resume with it. */
+  private pausedMusic: { seq: boolean; file: boolean } | null = null;
+  private player: HTMLAudioElement | null = null;
 
   constructor() {
     const saved = load<Partial<GlobalSettings>>("music:global") ?? {};
     const seq = { ...defaultPattern(), ...(saved.seq ?? {}) };
     this.settings = {
-      volume: 0.7, thru: true, decay: 0.25, inputs: [], bindings: {}, dockHidden: false,
+      volume: 0.7, thru: true, decay: 0.25, inputs: [], bindings: {}, dockHidden: false, musicOn: true, intensity: 1,
       ...saved,
       seq,
     };
@@ -104,7 +124,8 @@ export class Studio {
     this.paramControls = controls;
     this.onBaseChanged = onBaseChanged;
     const saved = load<ModelSettings>(`music:model:${def.id}`);
-    this.modelSettings = saved ?? this.defaultModelSettings(def);
+    // Settings saved before the current defaults existed are replaced, so new default routes show up.
+    this.modelSettings = saved && saved.v === MODEL_SETTINGS_VERSION ? { ...saved, muted: saved.muted ?? [] } : this.defaultModelSettings(def);
     // Drop anything that points at parameters the model no longer has.
     const valid = new Set(this.targets().map((t) => t.id));
     this.modelSettings.routes = this.modelSettings.routes.filter((r) => valid.has(r.target));
@@ -117,7 +138,7 @@ export class Studio {
   private defaultModelSettings(def: ModelDefinition): ModelSettings {
     const macros: Record<string, number> = {};
     for (const m of def.macros ?? []) macros[m.key] = 0;
-    return { macros, routes: (def.modulations ?? []).map((r) => ({ ...r })) };
+    return { v: MODEL_SETTINGS_VERSION, macros, routes: (def.modulations ?? []).map((r) => ({ ...r })), muted: [] };
   }
 
   private saveModel(): void {
@@ -127,7 +148,7 @@ export class Studio {
   private renderMacros(): void {
     const macros = this.def?.macros ?? [];
     $("macros-section").hidden = macros.length === 0;
-    this.macroControls = renderParamControls($("macros"), macroSpecs(macros), this.modelSettings.macros, () => this.saveModel(), "macro:");
+    this.macroControls = renderParamControls($("macros"), macroSpecs(macros, this.def?.params ?? []), this.modelSettings.macros, () => this.saveModel(), "macro:");
   }
 
   /** Everything a route can push: macros first, then number parameters. */
@@ -157,10 +178,34 @@ export class Studio {
     return events;
   }
 
+  /** Whether the model's own reaction to this kind of note is switched on. */
+  reacts(role: NoteRole): boolean {
+    return this.settings.musicOn && !this.modelSettings.muted.includes(role);
+  }
+
+  /**
+   * Pause or resume the music along with the simulation. Pausing stops the
+   * sequencer and the audio file; resuming restarts whatever was playing.
+   */
+  setPaused(paused: boolean): void {
+    if (paused) {
+      const file = !!this.player && !this.player.paused;
+      this.pausedMusic = { seq: this.seq.playing, file };
+      if (this.seq.playing) this.toggleSequencer();
+      if (file) this.player!.pause();
+      this.audio.allNotesOff();
+    } else if (this.pausedMusic) {
+      if (this.pausedMusic.seq && !this.seq.playing) this.toggleSequencer();
+      if (this.pausedMusic.file && this.player) void this.player.play();
+      this.pausedMusic = null;
+    }
+  }
+
   /** Fill `out` with modulated values and update the slider markers. */
   apply(out: ParamValues): void {
     if (!this.def) return;
-    applyModulation(this.def, this.base, this.modelSettings.macros, this.modelSettings.routes, this.sources, out, this.macroOut);
+    const depth = this.settings.musicOn ? this.settings.intensity : 0;
+    applyModulation(this.def, this.base, this.modelSettings.macros, this.modelSettings.routes, this.sources, out, this.macroOut, depth);
     this.paramControls?.showModulation(out);
     this.macroControls?.showModulation(this.macroOut);
   }
@@ -389,9 +434,13 @@ export class Studio {
 
     // Modulation
     $("mod-add").addEventListener("click", () => {
-      const first = this.targets()[0];
-      if (!first) return;
-      this.modelSettings.routes.push({ source: "kick", target: first.id, amount: 0.3 });
+      const targets = this.targets();
+      if (targets.length === 0) return;
+      // Start from a sound and a slider that nothing uses yet, so a new route does something visible.
+      const routes = this.modelSettings.routes;
+      const source = ["kick", "snare", "hat", "tone", "lfoBar", "bass", "env"].find((id) => !routes.some((r) => r.source === id)) ?? "kick";
+      const target = targets.find((t) => !routes.some((r) => r.target === t.id)) ?? targets[0];
+      routes.push({ source, target: target.id, amount: 0.5 });
       this.saveModel();
       this.renderRoutes();
     });
@@ -403,8 +452,31 @@ export class Studio {
       this.renderRoutes();
     });
     const decay = $<HTMLInputElement>("mod-decay");
+    const decayOut = $("mod-decay-readout");
     decay.value = String(s.decay);
-    decay.addEventListener("input", () => { s.decay = this.sources.decay = Number(decay.value); this.saveGlobal(); });
+    decayOut.textContent = `${s.decay.toFixed(2)} s`;
+    decay.addEventListener("input", () => {
+      s.decay = this.sources.decay = Number(decay.value);
+      decayOut.textContent = `${s.decay.toFixed(2)} s`;
+      this.saveGlobal();
+    });
+    const intensity = $<HTMLInputElement>("mod-intensity");
+    const intensityOut = $("mod-intensity-readout");
+    intensity.value = String(s.intensity);
+    intensityOut.textContent = `${Math.round(s.intensity * 100)}%`;
+    intensity.addEventListener("input", () => {
+      s.intensity = Number(intensity.value);
+      intensityOut.textContent = `${Math.round(s.intensity * 100)}%`;
+      this.saveGlobal();
+    });
+    const enabled = $<HTMLInputElement>("mod-enabled");
+    enabled.checked = s.musicOn;
+    enabled.addEventListener("change", () => {
+      s.musicOn = enabled.checked;
+      document.querySelector(".mod-layout")?.classList.toggle("bypassed", !s.musicOn);
+      this.saveGlobal();
+    });
+    document.querySelector(".mod-layout")?.classList.toggle("bypassed", !s.musicOn);
 
     // MIDI
     $("midi-refresh").addEventListener("click", () => void this.refreshInputs());
@@ -426,11 +498,10 @@ export class Studio {
     // Audio file
     const file = $<HTMLInputElement>("audio-file");
     const audioPlay = $<HTMLButtonElement>("audio-play");
-    let player: HTMLAudioElement | null = null;
     file.addEventListener("change", () => {
       const f = file.files?.[0];
       if (!f) return;
-      player = this.audio.loadFile(f);
+      const player = (this.player = this.audio.loadFile(f));
       $("audio-name").textContent = f.name;
       audioPlay.disabled = false;
       player.addEventListener("play", () => (audioPlay.textContent = "Pause"));
@@ -438,6 +509,7 @@ export class Studio {
       void player.play().catch((e) => ($("audio-name").textContent = `Can't play ${f.name}: ${e}`));
     });
     audioPlay.addEventListener("click", () => {
+      const player = this.player;
       if (!player) return;
       if (player.paused) void player.play();
       else player.pause();
@@ -553,9 +625,16 @@ export class Studio {
   private updateMeters(): void {
     if ($("dock").classList.contains("collapsed")) return;
     for (const k in this.meterBars) this.meterBars[k].style.width = `${this.sources.get(k) * 100}%`;
+    for (const m of this.sourceMeters) {
+      if (!m.bar.isConnected || m.bar.offsetParent === null) continue;
+      m.bar.style.width = `${Math.min(1, Math.abs(this.sources.get(m.source()))) * 100}%`;
+    }
   }
 
+  /** Draw the modulation matrix: the model's note reactions, then its routes. */
   private renderRoutes(): void {
+    this.sourceMeters = [];
+    this.renderReactions();
     const box = $("mod-routes");
     box.replaceChildren();
     const targets = this.targets();
@@ -563,6 +642,7 @@ export class Studio {
       box.append(el("p", { className: "muted", textContent: "No routes. Add one to let a sound or controller push a slider." }));
     }
     this.modelSettings.routes.forEach((route, i) => {
+      const on = el("input", { type: "checkbox", checked: !route.off, title: "Switch this route on or off" });
       const source = el("select");
       const groups = new Map<string, HTMLOptGroupElement>();
       for (const s of SOURCES) {
@@ -580,27 +660,88 @@ export class Studio {
         ccGroup.append(el("option", { value: route.source, textContent: sourceLabel(route.source) }));
       }
       source.value = route.source;
-      source.addEventListener("change", () => { route.source = source.value; this.saveModel(); source.blur(); });
+      source.addEventListener("change", () => { route.source = source.value; this.routesChanged(); source.blur(); });
+
+      const meterFill = el("div", { className: "meter-fill" });
+      this.sourceMeters.push({ bar: meterFill, source: () => route.source });
+      const meter = el("div", { className: "meter-track", title: "What this sound is doing right now" }, meterFill);
 
       const target = el("select");
       for (const t of targets) target.append(el("option", { value: t.id, textContent: t.label }));
       target.value = route.target;
-      target.addEventListener("change", () => { route.target = target.value; this.saveModel(); target.blur(); });
+      target.addEventListener("change", () => { route.target = target.value; this.routesChanged(); target.blur(); });
 
-      const amount = el("input", { type: "range", min: "-1", max: "1", step: "0.05", value: String(route.amount) });
-      const readout = el("span", { className: "readout", textContent: `${Math.round(route.amount * 100)}%` });
-      amount.addEventListener("input", () => {
-        route.amount = Number(amount.value);
-        readout.textContent = `${Math.round(route.amount * 100)}%`;
-        this.saveModel();
-      });
+      const amount = el("input", { type: "range", min: "-1", max: "1", step: "0.05", value: String(route.amount), title: "How far it pushes, as a share of the slider's range. Double-click to zero." });
+      const readout = el("span", { className: "readout", textContent: formatAmount(route.amount) });
+      const setAmount = (v: number) => {
+        route.amount = v;
+        readout.textContent = formatAmount(v);
+        this.routesChanged();
+      };
+      amount.addEventListener("input", () => setAmount(Number(amount.value)));
+      amount.addEventListener("dblclick", () => { amount.value = "0"; setAmount(0); });
       const remove = el("button", { type: "button", textContent: "×", className: "small", title: "Remove route" });
       remove.addEventListener("click", () => {
         this.modelSettings.routes.splice(i, 1);
-        this.saveModel();
+        this.routesChanged();
         this.renderRoutes();
       });
-      box.append(el("div", { className: "route" }, source, el("span", { className: "muted", textContent: "pushes" }), target, amount, readout, remove));
+      const row = el("div", { className: `route${route.off ? " off" : ""}` }, on, source, meter, el("span", { className: "muted", textContent: "→" }), target, amount, readout, remove);
+      on.addEventListener("change", () => {
+        route.off = !on.checked || undefined;
+        row.classList.toggle("off", !on.checked);
+        this.routesChanged();
+      });
+      box.append(row);
     });
+    this.showRouteBadges();
   }
+
+  private routesChanged(): void {
+    this.saveModel();
+    this.showRouteBadges();
+  }
+
+  /** List the model's built-in note reactions, each with a switch and a live hit meter. */
+  private renderReactions(): void {
+    const box = $("mod-reactions");
+    box.replaceChildren();
+    const reactions = this.def?.reactions ?? [];
+    if (reactions.length === 0) {
+      box.append(el("p", { className: "muted", textContent: "This model doesn't react to notes directly; routes are how music reaches it." }));
+      return;
+    }
+    for (const r of reactions) {
+      const input = el("input", { type: "checkbox", checked: !this.modelSettings.muted.includes(r.role) });
+      input.addEventListener("change", () => {
+        const muted = new Set(this.modelSettings.muted);
+        if (input.checked) muted.delete(r.role);
+        else muted.add(r.role);
+        this.modelSettings.muted = [...muted];
+        this.saveModel();
+      });
+      const fill = el("div", { className: "meter-fill" });
+      this.sourceMeters.push({ bar: fill, source: () => r.role });
+      box.append(el("label", { className: "reaction" }, input, el("span", { className: "reaction-role", textContent: ROLE_LABELS[r.role] }), el("div", { className: "meter-track" }, fill), el("span", { className: "muted", textContent: r.text })));
+    }
+  }
+
+  /** Under each sidebar slider, name the routes pushing it. */
+  private showRouteBadges(): void {
+    const params: Record<string, string[]> = {};
+    const macros: Record<string, string[]> = {};
+    for (const r of this.modelSettings.routes) {
+      if (r.off || r.amount === 0) continue;
+      const text = `${sourceLabel(r.source)} ${formatAmount(r.amount)}`;
+      const [bucket, key] = r.target.startsWith("macro:") ? [macros, r.target.slice(6)] : [params, r.target];
+      (bucket[key] ??= []).push(text);
+    }
+    const join = (m: Record<string, string[]>) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, v.join(", ")]));
+    this.paramControls?.showRoutes(join(params));
+    this.macroControls?.showRoutes(join(macros));
+  }
+}
+
+function formatAmount(v: number): string {
+  return `${v > 0 ? "+" : ""}${Math.round(v * 100)}%`;
 }

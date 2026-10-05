@@ -122,6 +122,11 @@ export class AudioEngine {
     v.osc.stop(t + 0.6);
   }
 
+  /** Release every held note, e.g. when playback pauses. */
+  allNotesOff(): void {
+    for (const note of [...this.voices.keys()]) this.noteOff(note);
+  }
+
   private voice(note: number, velocity: number, t: number): { osc: OscillatorNode; gain: GainNode } {
     const ctx = this.ctx!;
     const osc = ctx.createOscillator();

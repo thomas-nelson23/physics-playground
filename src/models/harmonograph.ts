@@ -7,7 +7,7 @@ const JUST: [number, number][] = [
 ];
 const INTERVAL_NAMES = ["Unison", "Minor 2nd", "Major 2nd", "Minor 3rd", "Major 3rd", "Fourth", "Tritone", "Fifth", "Minor 6th", "Major 6th", "Minor 7th", "Major 7th"];
 
-const TRAIL = 5000;
+const TRAIL = 10000;
 
 /**
  * A harmonograph: two damped pendulums swing a pen in x and y while a third
@@ -75,7 +75,7 @@ class HarmonographSim implements SimulationModel {
       // Integrating phase (rather than using f·t) keeps the pen continuous when f changes.
       this.px += base * this.glide * h * Math.PI * 2;
       this.py += base * (1 + detune) * h * Math.PI * 2;
-      this.rot += 0.03 * speed * h * Math.PI * 2;
+      this.rot += (p.spin as number) * speed * h * Math.PI * 2;
       const x0 = Math.sin(this.px) * this.amp;
       const y0 = Math.sin(this.py) * this.amp;
       // The rotary pendulum turns the paper slowly, so the figure precesses.
@@ -148,19 +148,38 @@ export const harmonograph: ModelDefinition = {
   fixedDt: 1 / 60,
   params: [
     {
-      kind: "choice", key: "interval", label: "Interval", default: "7",
+      kind: "choice", key: "interval", label: "Interval", default: "7", group: "Motion",
+      description: "The ratio between the two pendulums. Simple ratios draw clean loops.",
       options: INTERVAL_NAMES.map((name, i) => ({ value: String(i), label: `${name} (${JUST[i][0]}:${JUST[i][1]})` })),
     },
-    { kind: "number", key: "speed", label: "Swing speed", min: 0.05, max: 1.5, step: 0.05, default: 0.35 },
-    { kind: "number", key: "detune", label: "Detune", min: 0, max: 0.03, step: 0.001, default: 0.004 },
-    { kind: "number", key: "decay", label: "Damping", min: 0, max: 1, step: 0.01, default: 0.08 },
-    { kind: "number", key: "trail", label: "Line length", min: 200, max: TRAIL, step: 100, default: 3500 },
-    { kind: "number", key: "lineWidth", label: "Line width", min: 0.5, max: 4, step: 0.1, default: 1.2 },
+    { kind: "number", key: "speed", label: "Swing speed", min: 0.05, max: 4, step: 0.05, default: 0.35, group: "Motion",
+      description: "How fast the pendulums swing. High values scribble the figure in a blur." },
+    { kind: "number", key: "detune", label: "Detune", min: 0, max: 0.15, step: 0.001, default: 0.004, group: "Motion",
+      description: "Pulls the ratio slightly off. The figure slowly twists; high values weave dense knots." },
+    { kind: "number", key: "spin", label: "Paper spin", min: 0, max: 0.4, step: 0.005, default: 0.03, group: "Motion",
+      description: "How fast the paper turns under the pen, spinning the figure into a rosette." },
+    { kind: "number", key: "decay", label: "Damping", min: 0, max: 3, step: 0.01, default: 0.08, group: "Motion",
+      description: "How quickly the swing dies away. High values shrink the figure to a dot between notes." },
+    { kind: "number", key: "trail", label: "Line length", min: 200, max: TRAIL, step: 100, default: 3500, group: "Look",
+      description: "How much of the pen's path stays on screen." },
+    { kind: "number", key: "lineWidth", label: "Line width", min: 0.5, max: 8, step: 0.1, default: 1.2, group: "Look",
+      description: "How thick the pen line is drawn." },
   ],
   macros: [
-    { key: "drift", label: "Drift", targets: [{ param: "detune", amount: 0.4 }] },
-    { key: "tempo", label: "Faster", targets: [{ param: "speed", amount: 0.4 }] },
+    { key: "drift", label: "Drift", targets: [{ param: "detune", amount: 0.7 }] },
+    { key: "tempo", label: "Faster", targets: [{ param: "speed", amount: 0.55 }, { param: "trail", amount: 0.3 }] },
+    { key: "whirl", label: "Whirl", targets: [{ param: "spin", amount: 0.8 }, { param: "lineWidth", amount: 0.15 }] },
   ],
-  modulations: [{ source: "lfoBar", target: "detune", amount: 0.05 }],
+  modulations: [
+    { source: "kick", target: "lineWidth", amount: 0.4 },
+    { source: "snare", target: "speed", amount: 0.25 },
+    { source: "pitch", target: "detune", amount: 0.3 },
+    { source: "lfoBar", target: "spin", amount: 0.35 },
+    { source: "bass", target: "lineWidth", amount: 0.3 },
+  ],
+  reactions: [
+    { role: "tone", text: "Morphs the figure to the interval from the previous note and recolours the pen" },
+    { role: "kick", text: "Pushes the pendulums back up to full swing" },
+  ],
   create: () => new HarmonographSim(),
 };

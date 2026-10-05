@@ -121,8 +121,9 @@ class FirefliesSim implements SimulationModel {
     this.lure = input.pressed && input.type !== "up" ? { x: input.x, y: input.y } : null;
   }
 
-  render(g: CanvasRenderingContext2D): void {
+  render(g: CanvasRenderingContext2D, _view: Viewport, p: ParamValues): void {
     const { n, x, y, phase, hue } = this;
+    const glow = p.glow as number;
     g.fillStyle = "rgba(255,255,255,0.12)";
     for (let i = 0; i < n; i++) g.fillRect(x[i] - 1, y[i] - 1, 2, 2);
     g.globalCompositeOperation = "lighter";
@@ -130,7 +131,7 @@ class FirefliesSim implements SimulationModel {
       // Bright for a short moment just after the phase wraps, then dark.
       const b = Math.exp(-phase[i] * 3);
       if (b < 0.03) continue;
-      const r = 3 + b * 9;
+      const r = (3 + b * 9) * glow;
       g.fillStyle = `hsla(${hue[i]} 95% 65% / ${b * 0.35})`;
       g.beginPath();
       g.arc(x[i], y[i], r, 0, TAU);
@@ -154,17 +155,40 @@ export const fireflies: ModelDefinition = {
   hint: "Hold the mouse to draw the swarm in. Play the sequencer and watch them lock to the beat; melody notes light up a column in the note's colour.",
   fixedDt: 1 / 60,
   params: [
-    { kind: "number", key: "count", label: "Fireflies", min: 50, max: 900, step: 10, default: 450, resetOnChange: true },
-    { kind: "number", key: "rate", label: "Flash rate (Hz)", min: 0.2, max: 4, step: 0.05, default: 0.9 },
-    { kind: "number", key: "spread", label: "Rate spread (Hz)", min: 0, max: 1, step: 0.01, default: 0.15 },
-    { kind: "number", key: "coupling", label: "Coupling", min: 0, max: 6, step: 0.05, default: 1.2 },
-    { kind: "number", key: "radius", label: "Sight radius", min: 20, max: 400, step: 5, default: 110 },
-    { kind: "number", key: "entrain", label: "Beat pull", min: 0, max: 1.5, step: 0.05, default: 0.6 },
-    { kind: "number", key: "wander", label: "Wander", min: 0, max: 5, step: 0.1, default: 1.5 },
+    { kind: "number", key: "coupling", label: "Coupling", min: -5, max: 20, step: 0.05, default: 1.2, group: "Behaviour",
+      description: "How strongly fireflies copy their neighbours. Negative values make them flash out of turn." },
+    { kind: "number", key: "radius", label: "Sight radius", min: 10, max: 1000, step: 5, default: 110, group: "Behaviour",
+      description: "How far each firefly can see. Small radii give rippling waves, large ones one big flash." },
+    { kind: "number", key: "entrain", label: "Beat pull", min: 0, max: 3, step: 0.05, default: 0.8, group: "Behaviour",
+      description: "How hard each drum hit drags the swarm toward flashing on the beat." },
+    { kind: "number", key: "rate", label: "Flash rate (Hz)", min: 0.1, max: 8, step: 0.05, default: 0.9, group: "Behaviour",
+      description: "How often each firefly flashes on its own." },
+    { kind: "number", key: "spread", label: "Rate spread (Hz)", min: 0, max: 3, step: 0.01, default: 0.15, group: "Behaviour",
+      description: "How different each firefly's own rhythm is. High values resist syncing." },
+    { kind: "number", key: "wander", label: "Wander", min: 0, max: 20, step: 0.1, default: 1.5, group: "Motion",
+      description: "How restlessly the fireflies drift around the screen." },
+    { kind: "number", key: "glow", label: "Glow size", min: 0.3, max: 4, step: 0.05, default: 1, group: "Look",
+      description: "How big the halo around each flash is drawn." },
+    { kind: "number", key: "count", label: "Fireflies", min: 50, max: 900, step: 10, default: 450, resetOnChange: true, group: "Setup",
+      description: "How many fireflies are in the swarm." },
   ],
   macros: [
-    { key: "sync", label: "Sync", targets: [{ param: "coupling", amount: 0.5 }, { param: "spread", amount: -0.15 }] },
-    { key: "chaos", label: "Chaos", targets: [{ param: "spread", amount: 0.6 }, { param: "coupling", amount: -0.2 }] },
+    { key: "sync", label: "Sync", targets: [{ param: "coupling", amount: 0.6 }, { param: "spread", amount: -0.3 }, { param: "radius", amount: 0.4 }] },
+    { key: "chaos", label: "Chaos", targets: [{ param: "spread", amount: 0.6 }, { param: "coupling", amount: -0.35 }, { param: "wander", amount: 0.4 }] },
+    { key: "frenzy", label: "Frenzy", targets: [{ param: "rate", amount: 0.5 }, { param: "wander", amount: 0.5 }, { param: "glow", amount: 0.3 }] },
+  ],
+  modulations: [
+    { source: "kick", target: "glow", amount: 0.4 },
+    { source: "snare", target: "wander", amount: 0.4 },
+    { source: "pitch", target: "rate", amount: 0.25 },
+    { source: "lfoBar", target: "coupling", amount: 0.3 },
+    { source: "bass", target: "glow", amount: 0.35 },
+  ],
+  reactions: [
+    { role: "kick", text: "A flash every firefly sees, pulling the swarm onto the beat" },
+    { role: "snare", text: "A flash every firefly sees, pulling the swarm onto the beat" },
+    { role: "hat", text: "A softer flash that nudges the swarm toward the beat" },
+    { role: "tone", text: "Sets off the fireflies in the note's column and paints them its colour" },
   ],
   create: () => new FirefliesSim(),
 };

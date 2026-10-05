@@ -65,7 +65,10 @@ class ChladniSim implements SimulationModel {
     const [n, m, sign] = MODES[this.mode % MODES.length];
     const amp = (p.vibration as number) + this.shake;
     this.shake *= Math.exp(-dt * 4);
-    const pull = (p.settle as number) * dt * 0.25;
+    // Gradient descent toward the nodal lines overshoots (and the sand
+    // jitters across the line) once the per-step gain passes ~1, which
+    // happens sooner on busy modes, so cap the step for this mode.
+    const pull = Math.min((p.settle as number) * dt * 0.25, 0.9 / (Math.PI * (n + m)));
     const jitter = amp * dt * 0.05;
     const PI = Math.PI;
     const { gx, gy } = this;
@@ -124,7 +127,7 @@ class ChladniSim implements SimulationModel {
     const dh = ((this.targetHue - this.hue + 540) % 360) - 180;
     this.hue = (this.hue + dh * 0.06 + 360) % 360;
     g.fillStyle = p.colour ? `hsl(${this.hue} 70% 72%)` : "hsl(40 45% 78%)";
-    const r = 1.4;
+    const r = p.grainSize as number;
     const { gx, gy } = this;
     for (let i = 0; i < gx.length; i++) g.fillRect(ox + gx[i] * s - r / 2, oy + gy[i] * s - r / 2, r, r);
   }
@@ -143,16 +146,34 @@ export const chladni: ModelDefinition = {
   hint: "Play notes (sequencer or MIDI) to change the pattern, or use the Mode slider. Drag to stir the sand.",
   fixedDt: 1 / 60,
   params: [
-    { kind: "number", key: "mode", label: "Mode", min: 0, max: MODES.length - 1, step: 1, default: 6 },
-    { kind: "number", key: "vibration", label: "Vibration", min: 0, max: 4, step: 0.05, default: 0.6 },
-    { kind: "number", key: "settle", label: "Settling speed", min: 0, max: 4, step: 0.05, default: 1 },
-    { kind: "number", key: "grains", label: "Grains", min: 2000, max: 40000, step: 1000, default: 16000, resetOnChange: true },
-    { kind: "boolean", key: "colour", label: "Colour by note", default: true },
+    { kind: "number", key: "mode", label: "Mode", min: 0, max: MODES.length - 1, step: 1, default: 6, group: "Behaviour",
+      description: "Which vibration pattern the plate rings in. Higher modes draw busier figures." },
+    { kind: "number", key: "vibration", label: "Vibration", min: 0, max: 12, step: 0.05, default: 0.8, group: "Behaviour",
+      description: "How hard the plate shakes. High values blow the sand into a churning haze." },
+    { kind: "number", key: "settle", label: "Settling speed", min: 0, max: 12, step: 0.05, default: 1.2, group: "Behaviour",
+      description: "How fast sand slides onto the still lines. High values snap the figure sharp." },
+    { kind: "number", key: "grainSize", label: "Grain size", min: 0.5, max: 5, step: 0.1, default: 1.4, group: "Look",
+      description: "How big each grain of sand is drawn. Large grains make bold, chunky lines." },
+    { kind: "boolean", key: "colour", label: "Colour by note", default: true, group: "Look",
+      description: "Tint the sand with the colour of the last melody note instead of plain sand." },
+    { kind: "number", key: "grains", label: "Grains", min: 2000, max: 40000, step: 1000, default: 16000, resetOnChange: true, group: "Setup",
+      description: "How many grains of sand are on the plate. More grains draw finer lines." },
   ],
   macros: [
-    { key: "agitate", label: "Agitate", targets: [{ param: "vibration", amount: 0.5 }] },
-    { key: "settle", label: "Settle", targets: [{ param: "settle", amount: 0.5 }, { param: "vibration", amount: -0.1 }] },
+    { key: "agitate", label: "Agitate", targets: [{ param: "vibration", amount: 0.75 }, { param: "settle", amount: -0.3 }, { param: "grainSize", amount: 0.2 }] },
+    { key: "settle", label: "Settle", targets: [{ param: "settle", amount: 0.8 }, { param: "vibration", amount: -0.5 }] },
   ],
-  modulations: [{ source: "level", target: "vibration", amount: 0.2 }],
+  modulations: [
+    { source: "kick", target: "grainSize", amount: 0.45 },
+    { source: "snare", target: "vibration", amount: 0.35 },
+    { source: "lfoBar", target: "settle", amount: 0.3 },
+    { source: "bass", target: "vibration", amount: 0.4 },
+  ],
+  reactions: [
+    { role: "tone", text: "Rings the plate in a mode set by pitch and tints the sand the note's colour" },
+    { role: "kick", text: "A hard shake that throws the sand off the lines" },
+    { role: "snare", text: "A medium shake that blurs the figure" },
+    { role: "hat", text: "A medium shake that blurs the figure" },
+  ],
   create: () => new ChladniSim(),
 };

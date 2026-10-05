@@ -2,6 +2,9 @@ import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationM
 import { Raster, hsl, rgb } from "./lib/raster";
 import { noteHue } from "./lib/music";
 
+/** Velocity cap in cells per second (about five cells per step at 60 Hz). */
+const MAX_SPEED = 300;
+
 /**
  * Jos Stam's "stable fluids": an incompressible velocity field advected
  * semi-Lagrangian style and made divergence-free by a pressure projection,
@@ -103,7 +106,10 @@ class FluidSim implements SimulationModel {
         const a = t * 0.5 * side + (side > 0 ? Math.PI : 0);
         const cx = w / 2 + side * w * 0.25, cy = h / 2 + Math.sin(t * 0.7) * h * 0.15;
         const [r, g, b] = this.colour(scheme);
-        this.splat(cx, cy, Math.cos(a) * 40, Math.sin(a) * 40, [r * 0.15, g * 0.15, b * 0.15], Math.max(1.5, radius * 0.6), true);
+        const power = p.jetPower as number;
+        // Stronger jets also carry a little more dye so they stay visible.
+        const ink = 0.15 * Math.min(2.5, 0.5 + power / 80);
+        this.splat(cx, cy, Math.cos(a) * power, Math.sin(a) * power, [r * ink, g * ink, b * ink], Math.max(1.5, radius * 0.6), true);
       }
     }
 
@@ -115,9 +121,17 @@ class FluidSim implements SimulationModel {
     [this.vy, this.tmpY] = [this.tmpY, this.vy];
     this.project();
 
-    const fade = 1 - (p.fade as number) * dt;
-    const visc = 1 - (p.viscosity as number) * dt;
-    for (let i = 0; i < w * h; i++) { this.vx[i] *= visc; this.vy[i] *= visc; }
+    const fade = Math.max(0, 1 - (p.fade as number) * dt);
+    const visc = Math.max(0, 1 - (p.viscosity as number) * dt);
+    // Strong swirl confinement feeds on itself; capping the speed (in cells/s)
+    // keeps the top of the Swirl slider wild but bounded.
+    const vmax = MAX_SPEED;
+    const { vx, vy } = this;
+    for (let i = 0; i < w * h; i++) {
+      const x = vx[i] * visc, y = vy[i] * visc;
+      vx[i] = x > vmax ? vmax : x < -vmax ? -vmax : x;
+      vy[i] = y > vmax ? vmax : y < -vmax ? -vmax : y;
+    }
     for (let c = 0; c < 3; c++) {
       this.advect(this.dye[c], this.tmpDye, dt);
       const d = this.tmpDye;
@@ -251,13 +265,14 @@ class FluidSim implements SimulationModel {
     }
   }
 
-  render(g: CanvasRenderingContext2D): void {
+  render(g: CanvasRenderingContext2D, _view: Viewport, p: ParamValues): void {
     if (!this.raster) return;
     const px = this.raster.pixels;
     const [r, gr, b] = this.dye;
+    const k = p.exposure as number;
     // Soft tone mapping keeps dense dye bright without hard clipping.
     for (let i = 0; i < px.length; i++) {
-      px[i] = rgb(13 + 255 * (1 - Math.exp(-r[i] * 1.4)), 17 + 255 * (1 - Math.exp(-gr[i] * 1.4)), 23 + 255 * (1 - Math.exp(-b[i] * 1.4)));
+      px[i] = rgb(13 + 255 * (1 - Math.exp(-r[i] * k)), 17 + 255 * (1 - Math.exp(-gr[i] * k)), 23 + 255 * (1 - Math.exp(-b[i] * k)));
     }
     this.raster.draw(g, this.w * this.cell, this.h * this.cell, true);
   }
@@ -272,28 +287,51 @@ export const fluid: ModelDefinition = {
   name: "Ink in water",
   category: "Waves & fluids",
   description: "An incompressible fluid (Stam's stable fluids) carrying coloured dye. Vorticity confinement keeps the curls crisp.",
-  hint: "Drag to stir in dye. Right-drag or Shift-drag stirs without adding dye. Notes fire jets of dye from the floor, coloured and placed by pitch.",
+  hint: "Drag to stir in dye. Right-drag or Shift-drag stirs without adding dye. Notes fire jets of dye from the floor, coloured and placed by pitch; kicks burst a ring from the centre.",
   fixedDt: 1 / 60,
   params: [
+    { kind: "boolean", key: "jets", label: "Ambient jets", default: true, group: "Forces",
+      description: "Two slowly turning jets that keep the water moving when nobody stirs." },
+    { kind: "number", key: "jetPower", label: "Jet power", min: 0, max: 200, step: 1, default: 40, group: "Forces",
+      description: "How hard the ambient jets push. High values churn the whole tank." },
+    { kind: "number", key: "vorticity", label: "Swirl (vorticity)", min: 0, max: 100, step: 0.5, default: 10, group: "Forces",
+      description: "Feeds the small curls. High values boil the dye into tight eddies." },
+    { kind: "number", key: "viscosity", label: "Viscosity", min: 0, max: 8, step: 0.05, default: 0.1, group: "Forces",
+      description: "Thickness of the water. High values feel like syrup and stop flows fast." },
     {
-      kind: "choice", key: "colors", label: "Dye", default: "rainbow",
+      kind: "choice", key: "colors", label: "Dye", default: "rainbow", group: "Look",
+      description: "Colour of the dye from the brush and jets. Rainbow colours notes by pitch.",
       options: [
         { value: "rainbow", label: "Rainbow" },
         { value: "fire", label: "Fire" },
         { value: "ink", label: "Ink" },
       ],
     },
-    { kind: "boolean", key: "jets", label: "Ambient jets", default: true },
-    { kind: "number", key: "vorticity", label: "Swirl (vorticity)", min: 0, max: 30, step: 0.5, default: 10 },
-    { kind: "number", key: "viscosity", label: "Viscosity", min: 0, max: 2, step: 0.05, default: 0.1 },
-    { kind: "number", key: "fade", label: "Dye fade", min: 0, max: 2, step: 0.05, default: 0.35 },
-    { kind: "number", key: "brush", label: "Brush size", min: 8, max: 80, step: 1, default: 28 },
-    { kind: "number", key: "cellSize", label: "Cell size", min: 4, max: 16, step: 1, default: 7, resetOnChange: true },
+    { kind: "number", key: "fade", label: "Dye fade", min: 0, max: 6, step: 0.05, default: 0.35, group: "Look",
+      description: "How quickly dye disappears. 0 lets it build up into a dense cloud." },
+    { kind: "number", key: "exposure", label: "Glow", min: 0.2, max: 6, step: 0.05, default: 1.4, group: "Look",
+      description: "Brightness of the dye. High values make faint wisps glow." },
+    { kind: "number", key: "brush", label: "Brush size", min: 4, max: 200, step: 1, default: 28, group: "Brush",
+      description: "Width of your stirring brush, the jets and the note splashes." },
+    { kind: "number", key: "cellSize", label: "Cell size", min: 4, max: 24, step: 1, default: 7, resetOnChange: true, group: "Setup",
+      description: "Size of each grid square. Small gives fine detail but runs slower." },
   ],
   macros: [
-    { key: "swirl", label: "Swirl", targets: [{ param: "vorticity", amount: 0.5 }] },
-    { key: "linger", label: "Linger", targets: [{ param: "fade", amount: -0.15 }, { param: "viscosity", amount: -0.04 }] },
+    { key: "swirl", label: "Swirl", targets: [{ param: "vorticity", amount: 0.6 }, { param: "jetPower", amount: 0.3 }] },
+    { key: "linger", label: "Linger", targets: [{ param: "fade", amount: -0.1 }, { param: "viscosity", amount: -0.05 }, { param: "exposure", amount: 0.25 }] },
+    { key: "torrent", label: "Torrent", targets: [{ param: "jetPower", amount: 0.8 }, { param: "brush", amount: 0.3 }, { param: "vorticity", amount: 0.2 }] },
   ],
-  modulations: [{ source: "env", target: "vorticity", amount: 0.25 }],
+  modulations: [
+    { source: "kick", target: "exposure", amount: 0.25 },
+    { source: "env", target: "vorticity", amount: 0.3 },
+    { source: "bass", target: "jetPower", amount: 0.4 },
+    { source: "lfoBar", target: "brush", amount: 0.15 },
+  ],
+  reactions: [
+    { role: "kick", text: "Bursts a ring of dye out from the centre" },
+    { role: "snare", text: "Splashes dye in a random direction at a random spot" },
+    { role: "hat", text: "Gives the water a quick undyed stir at a random spot" },
+    { role: "tone", text: "Fires a jet of dye up from the floor, placed and coloured by pitch" },
+  ],
   create: () => new FluidSim(),
 };

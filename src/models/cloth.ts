@@ -1,4 +1,5 @@
 import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import { gravityAt, gravityModeParam, isUniform, uniformDir } from "./lib/gravity";
 
 const BUCKETS = 6;
 
@@ -76,6 +77,10 @@ class ClothSim implements SimulationModel {
     const { x, y, px, py, pinned, n } = this;
     this.time += dt;
     const gravity = p.gravity as number;
+    const mode = p.gravityMode as string;
+    const uniform = isUniform(mode);
+    const [ux, uy] = uniformDir(mode, this.time);
+    const { width: w, height: h } = this.view;
     const wind = (p.wind as number) * (0.6 + 0.4 * Math.sin(this.time * 1.3) + 0.2 * Math.sin(this.time * 3.7));
     const damp = 0.995;
     const dt2 = dt * dt;
@@ -86,14 +91,15 @@ class ClothSim implements SimulationModel {
       const vx = (x[k] - px[k]) * damp, vy = (y[k] - py[k]) * damp;
       px[k] = x[k];
       py[k] = y[k];
-      x[k] += vx + gust * dt2;
-      y[k] += vy + gravity * dt2;
+      let gx = ux * gravity, gy = uy * gravity;
+      if (!uniform) [gx, gy] = gravityAt(mode, gravity, x[k], y[k], w, h, this.time);
+      x[k] += vx + (gust + gx) * dt2;
+      y[k] += vy + gy * dt2;
     }
 
     const iters = p.stiffness as number;
     const tear = p.tearable ? (p.tearLimit as number) * this.rest : Infinity;
     const { ca, cb, alive, rest } = this;
-    const { width: w, height: h } = this.view;
     for (let it = 0; it < iters; it++) {
       for (let c = 0; c < ca.length; c++) {
         if (!alive[c]) continue;
@@ -115,9 +121,10 @@ class ClothSim implements SimulationModel {
       }
     }
 
+    // Every edge is solid (gravity can point any way), with friction along it.
     for (let k = 0; k < n; k++) {
-      if (x[k] < 0) x[k] = 0; else if (x[k] > w) x[k] = w;
-      if (y[k] > h) { y[k] = h; px[k] = x[k] - (x[k] - px[k]) * 0.5; }
+      if (x[k] < 0 || x[k] > w) { x[k] = x[k] < 0 ? 0 : w; py[k] = y[k] - (y[k] - py[k]) * 0.5; }
+      if (y[k] < 0 || y[k] > h) { y[k] = y[k] < 0 ? 0 : h; px[k] = x[k] - (x[k] - px[k]) * 0.5; }
     }
 
     if (this.cutter) this.cut(this.cutter.x, this.cutter.y, 14);
@@ -224,28 +231,59 @@ export const cloth: ModelDefinition = {
   name: "Cloth",
   category: "Mechanics",
   description: "A sheet of fabric simulated with Verlet integration and distance constraints. Links glow red as they stretch and snap past the tear limit.",
-  hint: "Drag to grab and pull the cloth. Right-drag or Shift-drag to slice it. Kicks blow gusts; notes pluck the cloth left to right by pitch.",
+  hint: "Drag to grab and pull the cloth. Right-drag or Shift-drag to slice it. Kicks blow gusts, snares shake it, notes pluck it left to right by pitch.",
   fixedDt: 1 / 60,
   params: [
+    gravityModeParam("down"),
     {
-      kind: "choice", key: "pins", label: "Hang from", default: "curtain", resetOnChange: true,
+      kind: "number", key: "gravity", label: "Gravity strength", min: 0, max: 5000, step: 10, default: 800, group: "Gravity",
+      description: "How hard gravity pulls the cloth. Very high values stretch it red and rip it.",
+    },
+    {
+      kind: "number", key: "wind", label: "Wind", min: -4000, max: 4000, step: 10, default: 80, group: "Forces",
+      description: "A gusty sideways breeze. Negative blows left, positive blows right.",
+    },
+    {
+      kind: "number", key: "stiffness", label: "Stiffness", min: 1, max: 40, step: 1, default: 8, group: "Behaviour",
+      description: "How firmly the fabric holds its shape. Low is stretchy like rubber; high is stiff like canvas.",
+    },
+    {
+      kind: "number", key: "tearLimit", label: "Tear limit", min: 1.2, max: 12, step: 0.1, default: 3.5, group: "Behaviour",
+      description: "How far a link can stretch (times its rest length) before it snaps.",
+    },
+    {
+      kind: "boolean", key: "tearable", label: "Tearable", default: true, group: "Behaviour",
+      description: "Lets over-stretched links snap. Off: the cloth stretches without ever breaking.",
+    },
+    {
+      kind: "choice", key: "pins", label: "Hang from", default: "curtain", resetOnChange: true, group: "Setup",
+      description: "Where the cloth is pinned along its top. Changing it restarts the scene.",
       options: [
         { value: "edge", label: "Whole top edge" },
         { value: "curtain", label: "Curtain rings" },
         { value: "corners", label: "Two corners" },
       ],
     },
-    { kind: "number", key: "resolution", label: "Resolution", min: 10, max: 90, step: 1, default: 50, resetOnChange: true },
-    { kind: "number", key: "gravity", label: "Gravity", min: 0, max: 2000, step: 10, default: 800 },
-    { kind: "number", key: "wind", label: "Wind", min: -1500, max: 1500, step: 10, default: 80 },
-    { kind: "number", key: "stiffness", label: "Stiffness (iterations)", min: 1, max: 30, step: 1, default: 8 },
-    { kind: "number", key: "tearLimit", label: "Tear limit (x rest length)", min: 1.5, max: 8, step: 0.1, default: 3.5 },
-    { kind: "boolean", key: "tearable", label: "Tearable", default: true },
+    {
+      kind: "number", key: "resolution", label: "Resolution", min: 10, max: 90, step: 1, default: 50, resetOnChange: true, group: "Setup",
+      description: "How many points across the cloth. Higher is smoother but heavier to run.",
+    },
   ],
   macros: [
-    { key: "storm", label: "Storm", targets: [{ param: "wind", amount: 0.35 }] },
-    { key: "float", label: "Weightless", targets: [{ param: "gravity", amount: -0.35 }] },
+    { key: "storm", label: "Storm", targets: [{ param: "wind", amount: 0.4 }, { param: "stiffness", amount: -0.1 }] },
+    { key: "float", label: "Weightless", targets: [{ param: "gravity", amount: -0.2 }, { param: "stiffness", amount: -0.1 }] },
+    { key: "shred", label: "Heavy & brittle", targets: [{ param: "gravity", amount: 0.5 }, { param: "tearLimit", amount: -0.3 }] },
   ],
-  modulations: [{ source: "lfoBar", target: "wind", amount: 0.08 }],
+  modulations: [
+    { source: "kick", target: "gravity", amount: 0.2 },
+    { source: "snare", target: "stiffness", amount: -0.3 },
+    { source: "lfoBar", target: "wind", amount: 0.12 },
+    { source: "bass", target: "wind", amount: 0.15 },
+  ],
+  reactions: [
+    { role: "kick", text: "A gust that switches side on each kick" },
+    { role: "snare", text: "Shakes every point at random" },
+    { role: "tone", text: "Plucks the cloth upward, left to right by pitch" },
+  ],
   create: () => new ClothSim(),
 };

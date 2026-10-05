@@ -75,12 +75,24 @@
               <div id="seq-grid"></div>
             </div>
             <div class="tab" data-tab="modulation" hidden>
-              <p class="muted tab-help">Routes let music push the current model's sliders. The coloured bar under a slider shows how far it's being pushed. Routes and macro settings are saved per model.</p>
-              <div id="mod-routes"></div>
-              <div class="row-buttons">
-                <button type="button" id="mod-add">Add route</button>
-                <button type="button" id="mod-defaults">Reset to model defaults</button>
-                <label class="inline">Note envelope decay <input id="mod-decay" type="range" min="0.05" max="1.5" step="0.05" /></label>
+              <div class="mod-layout">
+                <div class="mod-side">
+                  <div class="section-label">All models</div>
+                  <label class="check"><input id="mod-enabled" type="checkbox" /> Music drives the visuals</label>
+                  <label class="mod-global" title="Scales every route on every model. 100% is as set; 200% doubles every push.">Intensity <input id="mod-intensity" type="range" min="0" max="2" step="0.05" /> <span id="mod-intensity-readout" class="readout"></span></label>
+                  <label class="mod-global" title="How long a hit keeps pushing after it lands.">Note decay <input id="mod-decay" type="range" min="0.05" max="1.5" step="0.05" /> <span id="mod-decay-readout" class="readout"></span></label>
+                  <div class="section-label mod-gap">Note reactions in this model</div>
+                  <div id="mod-reactions"></div>
+                </div>
+                <div class="mod-main">
+                  <div class="section-label">Routes in this model</div>
+                  <p class="muted tab-help">Each route lets a sound push a slider by a share of its range. The bar shows the sound right now, and ♪ under a sidebar slider names what is pushing it.</p>
+                  <div id="mod-routes"></div>
+                  <div class="row-buttons">
+                    <button type="button" id="mod-add">Add route</button>
+                    <button type="button" id="mod-defaults">Reset to model defaults</button>
+                  </div>
+                </div>
               </div>
             </div>
             <div class="tab" data-tab="midi" hidden>

@@ -93,7 +93,12 @@ class ReactionSim implements SimulationModel {
     if (this.brush) this.paint(this.brush.x / this.cell, this.brush.y / this.cell, (p.brush as number) / this.cell, this.brush.erase);
     const iters = p.speed as number;
     const { w, h, feed, kill } = this;
-    const dA = 1.0, dB = 0.5;
+    const df = (p.feedShift as number) || 0;
+    const dk = (p.killShift as number) || 0;
+    // Explicit Euler with this 9-point stencil is stable for diffusion up to
+    // about 1.25 (less once the reaction terms are added), so cap it at 1.05.
+    const scale = Math.min(1.05, Math.max(0.05, (p.diffusion as number) || 1));
+    const dA = 1.0 * scale, dB = 0.5 * scale;
     for (let it = 0; it < iters; it++) {
       const a = this.a, b = this.b, na = this.na, nb = this.nb;
       for (let y = 0; y < h; y++) {
@@ -107,8 +112,9 @@ class ReactionSim implements SimulationModel {
           const lapB = 0.2 * (b[up + x] + b[down + x] + b[mid + l] + b[mid + r])
             + 0.05 * (b[up + l] + b[up + r] + b[down + l] + b[down + r]) - b[i];
           const abb = a[i] * b[i] * b[i];
-          na[i] = a[i] + dA * lapA - abb + feed[i] * (1 - a[i]);
-          nb[i] = b[i] + dB * lapB + abb - (kill[i] + feed[i]) * b[i];
+          const f = Math.max(0, feed[i] + df), k = Math.max(0, kill[i] + dk);
+          na[i] = a[i] + dA * lapA - abb + f * (1 - a[i]);
+          nb[i] = b[i] + dB * lapB + abb - (k + f) * b[i];
         }
       }
       this.a = na; this.na = a;
@@ -144,8 +150,11 @@ class ReactionSim implements SimulationModel {
     if (!this.raster) return;
     const lut = PALETTES[p.palette as string] ?? PALETTES.ocean;
     const px = this.raster.pixels, { a, b } = this;
+    // Contrast stretches the a-b difference around the same midpoint as before.
+    const c = (p.contrast as number) || 1.6;
+    const off = 0.5 + (1.25 - 0.5) * (c / 1.6);
     for (let i = 0; i < px.length; i++) {
-      const v = Math.max(0, Math.min(1, (a[i] - b[i]) * -1.6 + 1.25));
+      const v = Math.max(0, Math.min(1, (a[i] - b[i]) * -c + off));
       px[i] = lut[(v * 255) | 0];
     }
     this.raster.draw(g, this.w * this.cell, this.h * this.cell, true);
@@ -164,8 +173,30 @@ export const reaction: ModelDefinition = {
   hint: "Drag to drop chemical B and grow new patterns. Right-drag or Shift-drag to wipe an area clean. Notes seed new growth by pitch, kicks seed rings, snares wipe holes.",
   fixedDt: 1 / 60,
   params: [
+    { kind: "number", key: "feedShift", label: "Feed shift", min: -0.02, max: 0.02, step: 0.0005, default: 0, group: "Behaviour",
+      description: "Nudges how fast fresh chemical is fed in. Up floods with growth, down starves it." },
+    { kind: "number", key: "killShift", label: "Kill shift", min: -0.008, max: 0.008, step: 0.0002, default: 0, group: "Behaviour",
+      description: "Nudges how fast the pattern dies off. Down spreads blobs, up erodes into dots." },
+    { kind: "number", key: "diffusion", label: "Pattern scale", min: 0.2, max: 1.05, step: 0.01, default: 1, group: "Behaviour",
+      description: "How far the chemicals spread. Lower makes finer, tighter patterns." },
+    { kind: "number", key: "speed", label: "Steps per frame", min: 1, max: 32, step: 1, default: 8, group: "Behaviour",
+      description: "How many reaction steps run each frame, i.e. how fast patterns grow." },
     {
-      kind: "choice", key: "pattern", label: "Pattern", default: "coral", resetOnChange: true,
+      kind: "choice", key: "palette", label: "Colours", default: "ocean", group: "Look",
+      description: "Colour scheme for the chemicals.",
+      options: [
+        { value: "ocean", label: "Ocean" },
+        { value: "ember", label: "Ember" },
+        { value: "bio", label: "Bioluminescent" },
+      ],
+    },
+    { kind: "number", key: "contrast", label: "Contrast", min: 0.4, max: 5, step: 0.05, default: 1.6, group: "Look",
+      description: "How sharply the pattern's edges stand out. High values glow and saturate." },
+    { kind: "number", key: "brush", label: "Brush size", min: 4, max: 150, step: 1, default: 14, group: "Brush",
+      description: "Size of the area you seed or wipe when dragging." },
+    {
+      kind: "choice", key: "pattern", label: "Pattern", default: "coral", resetOnChange: true, group: "Setup",
+      description: "Which feed and kill rates to start from. Each grows a different family of shapes.",
       options: [
         { value: "coral", label: "Coral" },
         { value: "mitosis", label: "Cell division" },
@@ -176,21 +207,25 @@ export const reaction: ModelDefinition = {
         { value: "map", label: "Map of every pattern" },
       ],
     },
-    {
-      kind: "choice", key: "palette", label: "Colours", default: "ocean",
-      options: [
-        { value: "ocean", label: "Ocean" },
-        { value: "ember", label: "Ember" },
-        { value: "bio", label: "Bioluminescent" },
-      ],
-    },
-    { kind: "number", key: "speed", label: "Steps per frame", min: 1, max: 24, step: 1, default: 8 },
-    { kind: "number", key: "brush", label: "Brush size", min: 4, max: 60, step: 1, default: 14 },
-    { kind: "number", key: "cellSize", label: "Cell size", min: 2, max: 8, step: 1, default: 4, resetOnChange: true },
+    { kind: "number", key: "cellSize", label: "Cell size", min: 2, max: 8, step: 1, default: 4, resetOnChange: true, group: "Setup",
+      description: "Pixels per simulation cell. Smaller is sharper but slower. Restarts the pattern." },
   ],
   macros: [
-    { key: "grow", label: "Growth", targets: [{ param: "speed", amount: 0.5 }] },
+    { key: "grow", label: "Growth", targets: [{ param: "speed", amount: 0.8 }, { param: "contrast", amount: 0.2 }] },
+    { key: "bloom", label: "Bloom", targets: [{ param: "killShift", amount: -0.6 }, { param: "feedShift", amount: 0.3 }, { param: "contrast", amount: 0.3 }] },
+    { key: "dissolve", label: "Dissolve", targets: [{ param: "killShift", amount: 0.6 }, { param: "feedShift", amount: -0.3 }, { param: "diffusion", amount: -0.5 }] },
   ],
-  modulations: [{ source: "env", target: "speed", amount: 0.3 }],
+  modulations: [
+    { source: "kick", target: "speed", amount: 0.5 },
+    { source: "snare", target: "killShift", amount: 0.3 },
+    { source: "tone", target: "feedShift", amount: 0.25 },
+    { source: "lfoBar", target: "diffusion", amount: -0.4 },
+    { source: "bass", target: "contrast", amount: 0.4 },
+  ],
+  reactions: [
+    { role: "tone", text: "Seeds a blob of growth, placed by pitch" },
+    { role: "kick", text: "Seeds a ring of growth around the centre" },
+    { role: "snare", text: "Wipes a random hole for the pattern to regrow into" },
+  ],
   create: () => new ReactionSim(),
 };

@@ -115,9 +115,14 @@ export function modulatable(def: ModelDefinition): NumberSpec[] {
   return def.params.filter((p): p is NumberSpec => p.kind === "number" && !p.resetOnChange);
 }
 
-/** Macros as slider specs, so the same control code can draw them. */
-export function macroSpecs(macros: MacroSpec[]): NumberSpec[] {
-  return macros.map((m) => ({ kind: "number", key: m.key, label: m.label, min: 0, max: 1, step: 0.01, default: 0 }));
+/** Macros as slider specs, so the same control code can draw them. The description lists what each one pushes. */
+export function macroSpecs(macros: MacroSpec[], params: ParamSpec[]): NumberSpec[] {
+  return macros.map((m) => ({
+    kind: "number", key: m.key, label: m.label, min: 0, max: 1, step: 0.01, default: 0,
+    description: m.targets
+      .map((t) => `${params.find((p) => p.key === t.param)?.label ?? t.param} ${t.amount >= 0 ? "up" : "down"}`)
+      .join(", "),
+  }));
 }
 
 /**
@@ -133,6 +138,8 @@ export function applyModulation(
   sources: ModSources,
   out: ParamValues,
   macroOut: Record<string, number>,
+  /** Global music intensity: scales every route, 0 turns modulation off. */
+  depth = 1,
 ): void {
   for (const k in base) out[k] = base[k];
 
@@ -141,12 +148,13 @@ export function applyModulation(
   const offsets: Record<string, number> = {};
   for (const r of routes) {
     const src = sources.get(r.source);
-    if (src === 0) continue;
+    if (src === 0 || r.off || depth === 0) continue;
+    const push = r.amount * src * depth;
     if (r.target.startsWith("macro:")) {
       const key = r.target.slice(6);
-      if (key in macroOut) macroOut[key] += r.amount * src;
+      if (key in macroOut) macroOut[key] += push;
     } else {
-      offsets[r.target] = (offsets[r.target] ?? 0) + r.amount * src;
+      offsets[r.target] = (offsets[r.target] ?? 0) + push;
     }
   }
   for (const m of macros) {

@@ -1,5 +1,6 @@
 import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { noteHue } from "./lib/music";
+import { gravityAt, gravityModeParam, isUniform, uniformDir } from "./lib/gravity";
 
 interface Body {
   x: number;
@@ -11,8 +12,11 @@ interface Body {
   hue: number;
 }
 
+const MAX_SPEED = 2500;
+
 /**
- * N-body gravity with elastic collisions and wall bounces. O(n^2) pairwise
+ * N-body gravity with elastic collisions and wall bounces, plus an optional
+ * gravity field (a direction, or a pull toward the centre, corners or walls). O(n^2) pairwise
  * forces, which is fine for a few hundred bodies; a Barnes–Hut model can be
  * added later as a separate definition.
  */
@@ -21,6 +25,7 @@ class ParticleSim implements SimulationModel {
   private view: Viewport = { width: 1, height: 1 };
   private drag: { x0: number; y0: number; x: number; y: number } | null = null;
   private flash = 0;
+  private time = 0;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -71,17 +76,46 @@ class ParticleSim implements SimulationModel {
       }
     }
 
-    const damping = 1 - (p.damping as number) * dt;
+    // The gravity field: a direction, or a pull toward a point / edge.
+    this.time += dt;
+    const mode = p.gravityMode as string;
+    const fg = p.fieldGravity as number;
+    const { width: w, height: h } = this.view;
+    const uniform = isUniform(mode);
+    const [ux, uy] = uniformDir(mode, this.time);
+
+    const damping = Math.max(0, 1 - (p.damping as number) * dt);
     for (let i = 0; i < n; i++) {
       const b = bodies[i];
-      b.vx = (b.vx + ax[i] * dt) * damping;
-      b.vy = (b.vy + (ay[i] + (p.downwardGravity as number)) * dt) * damping;
+      let gx = ux * fg, gy = uy * fg;
+      if (!uniform) [gx, gy] = gravityAt(mode, fg, b.x, b.y, w, h, this.time, 60);
+      b.vx = (b.vx + (ax[i] + gx) * dt) * damping;
+      b.vy = (b.vy + (ay[i] + gy) * dt) * damping;
+      // A speed cap keeps close passes at extreme gravity from flinging bodies through each other.
+      const v2 = b.vx * b.vx + b.vy * b.vy;
+      if (v2 > MAX_SPEED * MAX_SPEED) {
+        const k = MAX_SPEED / Math.sqrt(v2);
+        b.vx *= k;
+        b.vy *= k;
+      }
       b.x += b.vx * dt;
       b.y += b.vy * dt;
     }
 
     if (p.collisions) this.collide(p.restitution as number);
     if (p.walls) this.bounceWalls(p.restitution as number);
+    else this.wrap();
+  }
+
+  /** Without walls, bodies leaving one edge come back on the opposite one, so a field can't empty the screen. */
+  private wrap(): void {
+    const { width: w, height: h } = this.view;
+    for (const b of this.bodies) {
+      if (b.x < -b.r) b.x += w + 2 * b.r;
+      else if (b.x > w + b.r) b.x -= w + 2 * b.r;
+      if (b.y < -b.r) b.y += h + 2 * b.r;
+      else if (b.y > h + b.r) b.y -= h + 2 * b.r;
+    }
   }
 
   private collide(e: number): void {
@@ -177,10 +211,15 @@ class ParticleSim implements SimulationModel {
       const cx = ev.role === "kick" ? w / 2 : Math.random() * w;
       const cy = ev.role === "kick" ? h / 2 : Math.random() * h;
       const force = (ev.role === "kick" ? 260 : 140) * ev.velocity;
+      // The wave fades to nothing before the walls. A wave that reached them pushed bodies at the
+      // edges along the wall, away from the centre, beat after beat, until they all piled into the corners.
+      const reach = Math.min(w, h) * (ev.role === "kick" ? 0.5 : 0.35);
       for (const b of this.bodies) {
         const dx = b.x - cx, dy = b.y - cy;
         const d = Math.hypot(dx, dy) + 30;
-        const f = (force * 120) / d;
+        const fade = Math.max(0, 1 - d / reach);
+        if (fade === 0) continue;
+        const f = ((force * 120) / d) * fade * fade;
         b.vx += (dx / d) * f;
         b.vy += (dy / d) * f;
       }
@@ -204,23 +243,64 @@ export const particles: ModelDefinition = {
   id: "particles",
   name: "Particles & gravity",
   category: "Particle physics",
-  description: "Bodies that attract each other, collide elastically, and bounce off the walls.",
-  hint: "Drag on the canvas to fling a new body. Hold Shift for a heavy one. Notes drop bodies coloured by pitch; kicks send out a shockwave.",
+  description: "Bodies that attract each other, collide and bounce, inside a gravity field you can point down, at the centre, the corners or the walls.",
+  hint: "Drag on the canvas to fling a new body. Hold Shift for a heavy one. Notes drop bodies coloured by pitch; kicks and snares send out shockwaves.",
   fixedDt: 1 / 120,
   params: [
-    { kind: "number", key: "count", label: "Bodies", min: 0, max: 600, step: 10, default: 150, resetOnChange: true },
-    { kind: "number", key: "gravity", label: "Mutual gravity", min: 0, max: 2000, step: 10, default: 300 },
-    { kind: "number", key: "downwardGravity", label: "Downward gravity", min: 0, max: 800, step: 10, default: 0 },
-    { kind: "number", key: "restitution", label: "Bounciness", min: 0, max: 1, step: 0.05, default: 0.9 },
-    { kind: "number", key: "damping", label: "Air drag", min: 0, max: 2, step: 0.05, default: 0 },
-    { kind: "boolean", key: "collisions", label: "Collisions", default: true },
-    { kind: "boolean", key: "walls", label: "Walls", default: true },
-    { kind: "boolean", key: "showVelocity", label: "Show velocity", default: false },
+    {
+      kind: "number", key: "gravity", label: "Mutual gravity", min: 0, max: 6000, step: 10, default: 300, group: "Gravity",
+      description: "How strongly bodies pull on each other. High values collapse everything into clumps.",
+    },
+    gravityModeParam("center"),
+    {
+      kind: "number", key: "fieldGravity", label: "Field strength", min: 0, max: 1500, step: 10, default: 80, group: "Gravity",
+      description: "How hard the gravity field pulls. Low keeps a loose cloud; high packs bodies tight.",
+    },
+    {
+      kind: "number", key: "restitution", label: "Bounciness", min: 0, max: 1, step: 0.05, default: 0.85, group: "Motion",
+      description: "How much speed a body keeps after a bounce. 0 is dead clay, 1 is a superball.",
+    },
+    {
+      kind: "number", key: "damping", label: "Air drag", min: 0, max: 5, step: 0.05, default: 0.15, group: "Motion",
+      description: "Slows every body over time. Zero lets shockwaves keep everything flying forever.",
+    },
+    {
+      kind: "boolean", key: "collisions", label: "Collisions", default: true, group: "Motion",
+      description: "Bodies bump off each other instead of passing through.",
+    },
+    {
+      kind: "boolean", key: "walls", label: "Walls", default: true, group: "Motion",
+      description: "Bodies bounce off the edges. Off: they wrap round to the opposite side.",
+    },
+    {
+      kind: "boolean", key: "showVelocity", label: "Show velocity", default: false, group: "Look",
+      description: "Draws a line from each body showing where and how fast it is moving.",
+    },
+    {
+      kind: "number", key: "count", label: "Bodies", min: 0, max: 800, step: 10, default: 150, resetOnChange: true, group: "Setup",
+      description: "How many bodies the scene starts with. Changing it restarts the scene.",
+    },
   ],
   macros: [
-    { key: "attract", label: "Attraction", targets: [{ param: "gravity", amount: 0.6 }, { param: "damping", amount: 0.15 }] },
-    { key: "bounce", label: "Bounce", targets: [{ param: "restitution", amount: 0.3 }, { param: "downwardGravity", amount: 0.5 }] },
+    {
+      key: "attract", label: "Collapse",
+      targets: [{ param: "gravity", amount: 0.7 }, { param: "fieldGravity", amount: 0.3 }, { param: "damping", amount: 0.15 }],
+    },
+    {
+      key: "bounce", label: "Bounce",
+      targets: [{ param: "restitution", amount: 0.3 }, { param: "damping", amount: -0.1 }, { param: "gravity", amount: -0.05 }, { param: "fieldGravity", amount: 0.5 }],
+    },
   ],
-  modulations: [{ source: "bass", target: "gravity", amount: 0.3 }],
+  modulations: [
+    { source: "kick", target: "gravity", amount: 0.3 },
+    { source: "snare", target: "fieldGravity", amount: 0.4 },
+    { source: "lfoBar", target: "fieldGravity", amount: 0.25 },
+    { source: "bass", target: "gravity", amount: 0.35 },
+  ],
+  reactions: [
+    { role: "kick", text: "Shockwave out from the centre" },
+    { role: "snare", text: "Smaller shockwave from a random spot" },
+    { role: "tone", text: "Drops a body coloured by pitch, left to right by pitch" },
+  ],
   create: () => new ParticleSim(),
 };
