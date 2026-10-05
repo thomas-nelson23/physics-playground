@@ -1,6 +1,7 @@
 import { models, findModel } from "./models/registry";
-import { defaultParams, type ModelDefinition, type ParamValues, type PointerInput, type SimulationModel, type Viewport } from "./models/types";
+import { defaultParams, type ModelDefinition, type ParamSpec, type ParamValues, type PointerInput, type SimulationModel, type Viewport } from "./models/types";
 import { renderParamControls } from "./ui/controls";
+import { Studio } from "./music/studio";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -20,12 +21,17 @@ const MAX_STEPS_PER_FRAME = 8;
 
 let def: ModelDefinition;
 let model: SimulationModel;
+/** Slider values, as the user set them. */
 let params: ParamValues;
+/** What the model sees: slider values pushed by macros and modulation. */
+let effective: ParamValues = {};
 let view: Viewport = { width: 1, height: 1 };
 let running = true;
 let accumulator = 0;
 let lastTime = performance.now();
 let fps = 0;
+
+const studio = new Studio();
 
 // ---- Model selection -------------------------------------------------------
 
@@ -53,14 +59,20 @@ function loadModel(id: string): void {
   def = findModel(id) ?? models[0];
   select.value = def.id;
   params = defaultParams(def);
+  effective = { ...params };
   model = def.create();
-  model.reset(view, params);
+  model.reset(view, effective);
   accumulator = 0;
   description.textContent = def.description;
   hint.textContent = def.hint ?? "No canvas interaction for this model.";
-  renderParamControls(paramsEl, def.params, params, (spec) => {
-    if (spec.resetOnChange) model.reset(view, params);
-  });
+  const onChange = (spec: ParamSpec) => {
+    if (spec.resetOnChange) {
+      effective[spec.key] = params[spec.key];
+      model.reset(view, effective);
+    }
+  };
+  const controls = renderParamControls(paramsEl, def.params, params, onChange);
+  studio.setModel(def, params, controls, onChange);
   try {
     localStorage.setItem("lastModel", def.id);
   } catch {
@@ -81,7 +93,7 @@ function resize(): void {
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   if (!model) return;
   if (model.resize) model.resize(view);
-  else model.reset(view, params);
+  else model.reset(view, effective);
 }
 
 // ---- Input -----------------------------------------------------------------
@@ -98,7 +110,7 @@ function sendPointer(type: PointerInput["type"], e: PointerEvent): void {
       pressed: e.buttons !== 0,
       shift: e.shiftKey,
     },
-    params,
+    effective,
   );
 }
 
@@ -117,15 +129,16 @@ function setRunning(value: boolean): void {
 }
 
 playPause.addEventListener("click", () => setRunning(!running));
-stepBtn.addEventListener("click", () => model.step(def.fixedDt ?? 1 / 60, params));
-resetBtn.addEventListener("click", () => model.reset(view, params));
+stepBtn.addEventListener("click", () => model.step(def.fixedDt ?? 1 / 60, effective));
+resetBtn.addEventListener("click", () => model.reset(view, effective));
 select.addEventListener("change", () => loadModel(select.value));
 
 window.addEventListener("keydown", (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
   if (e.code === "Space") { e.preventDefault(); setRunning(!running); }
-  else if (e.key === "r") model.reset(view, params);
-  else if (e.key === "." && !running) model.step(def.fixedDt ?? 1 / 60, params);
+  else if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement)) { e.preventDefault(); studio.toggleSequencer(); }
+  else if (e.key === "r") model.reset(view, effective);
+  else if (e.key === "." && !running) model.step(def.fixedDt ?? 1 / 60, effective);
 });
 
 // ---- Main loop -------------------------------------------------------------
@@ -135,13 +148,17 @@ function frame(now: number): void {
   lastTime = now;
   fps = fps * 0.9 + (elapsed > 0 ? 1 / elapsed : 0) * 0.1;
 
+  const notes = studio.frame(now / 1000, elapsed);
+  studio.apply(effective);
+  if (running && model.onNote) for (const n of notes) model.onNote(n, effective);
+
   if (running) {
     // Fixed-timestep integration keeps physics stable on 60Hz and 120Hz screens alike.
     const dt = def.fixedDt ?? 1 / 60;
     accumulator += elapsed;
     let steps = 0;
     while (accumulator >= dt && steps < MAX_STEPS_PER_FRAME) {
-      model.step(dt, params);
+      model.step(dt, effective);
       accumulator -= dt;
       steps++;
     }
@@ -150,7 +167,7 @@ function frame(now: number): void {
 
   g.fillStyle = "#0d1117";
   g.fillRect(0, 0, view.width, view.height);
-  model.render(g, view, params);
+  model.render(g, view, effective);
 
   const extra = model.stats?.();
   statsEl.textContent = `${Math.round(fps)} fps${extra ? ` · ${extra}` : ""}`;

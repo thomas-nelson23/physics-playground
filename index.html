@@ -23,6 +23,10 @@
           <button id="step" type="button">Step</button>
           <button id="reset" type="button">Reset</button>
         </section>
+        <section id="macros-section" hidden>
+          <div class="section-label">Macros</div>
+          <div id="macros"></div>
+        </section>
         <section>
           <div class="section-label">Parameters</div>
           <div id="params"></div>
@@ -33,8 +37,90 @@
         </section>
         <footer class="muted" id="stats"></footer>
       </aside>
-      <main id="stage">
-        <canvas id="canvas"></canvas>
+      <main id="main">
+        <div id="stage">
+          <canvas id="canvas"></canvas>
+        </div>
+        <section id="dock">
+          <nav id="dock-tabs">
+            <button type="button" data-tab="sequencer" class="active">Sequencer</button>
+            <button type="button" data-tab="modulation">Modulation</button>
+            <button type="button" data-tab="midi">MIDI</button>
+            <button type="button" data-tab="audio">Audio file</button>
+            <span class="spacer"></span>
+            <button type="button" id="seq-play" class="primary">Play</button>
+            <label class="inline">Tempo <input id="seq-tempo" type="number" min="40" max="240" step="1" /> BPM</label>
+            <span id="midi-led" class="led" title="MIDI activity"></span>
+            <button type="button" id="dock-toggle" title="Hide the music panel">Hide</button>
+          </nav>
+          <div id="dock-body">
+            <div class="tab" data-tab="sequencer">
+              <div class="seq-controls">
+                <label>Scale <select id="seq-scale"></select></label>
+                <label>Root <select id="seq-root"></select></label>
+                <label>Synth <select id="seq-wave">
+                  <option value="triangle">Soft</option>
+                  <option value="sawtooth">Bright</option>
+                  <option value="square">Hollow</option>
+                  <option value="sine">Pure</option>
+                </select></label>
+                <label>Swing <input id="seq-swing" type="range" min="0" max="0.8" step="0.05" /></label>
+                <label>Volume <input id="seq-volume" type="range" min="0" max="1" step="0.01" /></label>
+                <label class="check"><input id="seq-sound" type="checkbox" /> Sound on</label>
+                <div class="row-buttons">
+                  <button type="button" id="seq-random">Randomise</button>
+                  <button type="button" id="seq-clear">Clear</button>
+                </div>
+              </div>
+              <div id="seq-grid"></div>
+            </div>
+            <div class="tab" data-tab="modulation" hidden>
+              <p class="muted tab-help">Routes let music push the current model's sliders. The coloured bar under a slider shows how far it's being pushed. Routes and macro settings are saved per model.</p>
+              <div id="mod-routes"></div>
+              <div class="row-buttons">
+                <button type="button" id="mod-add">Add route</button>
+                <button type="button" id="mod-defaults">Reset to model defaults</button>
+                <label class="inline">Note envelope decay <input id="mod-decay" type="range" min="0.05" max="1.5" step="0.05" /></label>
+              </div>
+            </div>
+            <div class="tab" data-tab="midi" hidden>
+              <div class="midi-cols">
+                <div>
+                  <div class="section-label">Inputs</div>
+                  <div id="midi-inputs" class="muted"></div>
+                  <div class="row-buttons">
+                    <button type="button" id="midi-refresh">Refresh</button>
+                    <label class="check"><input id="midi-thru" type="checkbox" /> Play notes through the synth</label>
+                  </div>
+                  <p id="midi-last" class="muted"></p>
+                </div>
+                <div>
+                  <div class="section-label">Controller mapping</div>
+                  <div class="row-buttons">
+                    <button type="button" id="midi-learn">MIDI learn</button>
+                  </div>
+                  <p id="midi-learn-help" class="muted">Click MIDI learn, click a slider or macro, then move a knob on your controller.</p>
+                  <div id="midi-bindings"></div>
+                </div>
+              </div>
+            </div>
+            <div class="tab" data-tab="audio" hidden>
+              <div class="midi-cols">
+                <div>
+                  <p class="muted tab-help">Play a song and its bass, mids, treble and level become modulation sources. Kick drums in the song can trigger note reactions too.</p>
+                  <div class="row-buttons">
+                    <label class="button" for="audio-file">Open audio file…</label>
+                    <input id="audio-file" type="file" accept="audio/*" hidden />
+                    <button type="button" id="audio-play" disabled>Play</button>
+                    <label class="check"><input id="audio-beats" type="checkbox" checked /> Beats trigger notes</label>
+                  </div>
+                  <p id="audio-name" class="muted">No file loaded.</p>
+                </div>
+                <div id="meters"></div>
+              </div>
+            </div>
+          </div>
+        </section>
       </main>
     </div>
     <script type="module" src="/src/main.ts"></script>
