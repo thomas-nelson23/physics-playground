@@ -157,6 +157,16 @@ class ReactionSim implements SimulationModel {
     } else if (ev.role === "snare") {
       // Snares wipe a hole the pattern has to regrow into.
       this.paint(Math.random() * w, Math.random() * h, 4 + ev.velocity * 6, true);
+    } else if (ev.role === "bassline") {
+      // A seed low down, placed by pitch.
+      this.paint(w * (0.1 + ev.x * 0.8), h * 0.85, 1.5 + ev.velocity * 2.5, false);
+    } else if (ev.role === "chord") {
+      // One seed per chord note round a circle, at the note's place on the colour wheel.
+      const r = Math.min(w, h) * 0.32;
+      for (const n of ev.notes ?? [ev.note]) {
+        const a = ((((n % 12) + 12) % 12) / 12) * Math.PI * 2 - Math.PI / 2;
+        this.paint(w / 2 + Math.cos(a) * r, h / 2 + Math.sin(a) * r, 1.5 + ev.velocity * 2, false);
+      }
     } else if (ev.role === "hat") {
       // A pinch of tiny seeds.
       for (let k = 0; k < 3; k++) this.paint(Math.random() * w, Math.random() * h, 1 + ev.velocity, false);
@@ -277,6 +287,8 @@ export const reaction: ModelDefinition = {
     { source: "kick", text: "Seeds a ring of growth around the centre and flashes the ink" },
     { source: "snare", text: "Wipes a random hole for the pattern to regrow into" },
     { source: "hat", text: "Sprinkles tiny seeds" },
+    { source: "bassline", text: "Seeds growth low down, placed by pitch" },
+    { source: "chord", text: "Seeds one blob per chord note round a circle, like a colour wheel" },
     { source: "spectrum", text: "Loud frequencies make their column grow (Spectrum growth)" },
     { source: "bass", text: "A glow over the ink swells (Bass bloom)" },
   ],

@@ -21,6 +21,8 @@ export const SOURCES: SourceInfo[] = [
   { id: "snare", label: "Snare", group: "Notes" },
   { id: "hat", label: "Hi-hat", group: "Notes" },
   { id: "tone", label: "Melody notes", group: "Notes" },
+  { id: "bassline", label: "Bass notes", group: "Notes" },
+  { id: "chord", label: "Chords", group: "Notes" },
   { id: "velocity", label: "Last velocity", group: "Notes" },
   { id: "pitch", label: "Last pitch", group: "Notes" },
   { id: "gate", label: "Held MIDI notes", group: "Notes" },
@@ -64,7 +66,9 @@ export class ModSources {
   /** Advance envelopes and LFOs. `beats` is the musical clock in quarter notes. */
   update(dt: number, beats: number, bands: AudioBands): void {
     const fall = Math.exp(-dt / Math.max(0.02, this.decay));
-    for (const id of ["env", "kick", "snare", "hat", "tone"]) this.values[id] *= fall;
+    for (const id of ["env", "kick", "snare", "hat", "tone", "bassline"]) this.values[id] *= fall;
+    // Chords ring longer than single notes.
+    this.values.chord *= Math.exp(-dt / Math.max(0.05, this.decay * 2.5));
     this.values.lfoBar = 0.5 - 0.5 * Math.cos((beats / 4) * Math.PI * 2);
     this.values.lfoBeat = 0.5 - 0.5 * Math.cos(beats * Math.PI * 2);
     this.values.ramp = (beats / 4) % 1;
@@ -80,7 +84,7 @@ export class ModSources {
     v.env = Math.max(v.env, ev.velocity);
     v[ev.role] = Math.max(v[ev.role], ev.velocity);
     v.velocity = ev.velocity;
-    v.pitch = ev.x;
+    if (ev.role === "tone") v.pitch = ev.x;
     if (ev.source === "midi" && ev.role === "tone") this.held.add(ev.note);
   }
 

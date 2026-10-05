@@ -251,6 +251,17 @@ class OrbitsSim implements SimulationModel {
       this.links = Math.max(this.links, ev.velocity);
       return;
     }
+    if (ev.role === "bassline") {
+      this.pulse = Math.max(this.pulse, ev.velocity * 0.5);
+      for (const b of this.bodies) if (b.star) this.ripples.push({ x: b.x, y: b.y, r: b.r, life: ev.velocity * 0.45 });
+      return;
+    }
+    if (ev.role === "chord") {
+      // Every planet tuned to a note of the chord glows.
+      const pcs = new Set((ev.notes ?? [ev.note]).map((n) => ((n % 12) + 12) % 12));
+      for (const b of this.bodies) if (!b.star && pcs.has(b.pc)) b.glow = Math.max(b.glow, ev.velocity * 0.8);
+      return;
+    }
     if (ev.role === "hat") {
       const planets = this.bodies.filter((b) => !b.star);
       for (let k = 0; k < 4 && planets.length; k++) planets[Math.floor(Math.random() * planets.length)].glow = ev.velocity * 0.8;
@@ -500,6 +511,8 @@ export const orbits: ModelDefinition = {
     { source: "snare", text: "Flashes constellation lines between neighbouring planets" },
     { source: "hat", text: "A few planets twinkle" },
     { source: "tone", text: "Planets tuned to the note flare, and a new one is born in its colour; low notes on outer orbits" },
+    { source: "bassline", text: "The sun throbs and sends a faint ripple" },
+    { source: "chord", text: "Every planet tuned to a note of the chord glows" },
     { source: "bass", text: "The sun swells" },
     { source: "spectrum", text: "Planets glow with their orbit's frequency; the sun's corona traces the waveform" },
     { source: "level", text: "Trails brighten as the music gets louder" },

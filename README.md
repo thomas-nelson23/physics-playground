@@ -25,9 +25,15 @@ Keyboard: `Space` play/pause the simulation, `Enter` play/stop the sequencer, `R
 
 The panel under the canvas has four tabs.
 
-- **Sequencer**: a generative drum machine and melody. Instead of programming steps, you steer it: **Drum density** adds hits to the drum pattern (from a bare backbone up to ghost notes and rolls), **Melody density** fills the melody in with more notes, **Variation** sets how much the pattern evolves each bar and how often it plays a fill, and **Melody range** sets how far the melody wanders. The XY pad sets both densities at once with one drag. **New idea** starts a fresh pattern, **Fill** plays a fill at the end of the bar, and **Hold** freezes the pattern. Pick a drum style (broken beat, four on the floor, half-time, ambient), a scale and root, and swing. The view shows the bar that's playing. It plays through a small built-in synth (or silently, with Sound off) and sends every hit to the current model.
+- **Sequencer**: a generative band in five sections. Instead of programming steps, you steer each part and it writes and evolves the music itself.
+  - **Global**: tempo, style (broken beat, four on the floor, half-time, ambient), swing, scale and root, plus synth sound, volume, **New idea** (fresh patterns and progression), **Fill** and **Hold** (freeze everything).
+  - **Drums**: a euclidean sequencer drawn as three rings (kick inside, snare, hats outside). Each track's **Density** sets how many hits are spread evenly round the bar and **Variation** how much each bar strays with ghost notes, dropped hits and nudges. Drag a ring round to turn its pattern; double-click to put it back. Picking a global style resets the rings to that style's beat.
+  - **Bass**: a style (root pulse, off-beat, octave bounce, syncopated, walking, drone), **Density**, **Range** (root only, then octave, fifth, chord tones and passing notes) and **Variation**. It follows the chords.
+  - **Chords**: jazz, pop, dance or epic, each cycling through progressions typical of the style. **Change every** sets how long each chord lasts, **Variation** switches progressions and swaps in style-typical substitutes (tritone subs, relative chords, sus and added notes), and **Rhythm density** and **Rhythm variation** shape the comping. Epic is the wildcard: cinematic progressions with chromatic jumps and power chords, doubled an octave each side, and now and then it lifts the whole song up a step for a pass.
+  - **Melody**: a style (wander, arpeggio, motif, lyrical), **Range**, **Density**, and **Groove**, which adds syncopation, clips notes shorter and makes the second half of the bar answer the first. Strong beats lean on chord tones.
+  Every part has a switch to mute it, and every control can be mapped to a MIDI knob. It plays through a small built-in synth (or silently, with Sound off) and sends every hit, bass note and chord to the current model.
 - **Modulation**: routes that let a music source push a slider. Sources are note envelopes (any note, kick, snare, hat, melody), last velocity and pitch, held MIDI notes, tempo-synced LFOs, audio levels (overall, bass, mids, treble), the mod wheel, pitch bend and any MIDI CC. Targets are the model's number sliders and its macros. A coloured bar under a slider shows how far it's being pushed.
-- **MIDI**: pick input devices, play notes through the synth, and map knobs with MIDI learn (click MIDI learn, click a slider or macro, turn a knob). Macro and sequencer mappings carry across models, so a knob can ride the drum or melody density live.
+- **MIDI**: pick input devices, play notes through the synth, and map knobs with MIDI learn (click MIDI learn, click a slider or macro, turn a knob). Macro and sequencer mappings carry across models, so a knob can ride a drum track's density or the chord speed live.
 - **Audio file**: play a song; its levels become modulation sources and its kick drums trigger note reactions.
 
 Every model also reacts to the music by itself: to each kind of note, and continuously to the sound's bass, loudness, spectrum and waveform. The Modulation tab lists each of these **built-in reactions** with a live meter and a switch to turn it off. The **Intensity** slider there scales them along with every route, and **Music drives the visuals** turns them all off. Each model also has a few **macros**: single 0..1 knobs that push several parameters at once. Routes, macro settings and switched-off reactions are saved per model.
@@ -168,7 +174,7 @@ src/
     lib/music.ts     note colours and helpers for musical models
   music/
     studio.ts        music panel: sequencer UI, routes, MIDI learn, audio file
-    sequencer.ts     generative drums and melody with lookahead scheduling
+    sequencer.ts     generative drums, bass, chords and melody with lookahead scheduling
     audio.ts         drum kit, synth, file player, band and spectrum analyser
     modulation.ts    modulation sources and how they combine with sliders and macros
     midi.ts          MIDI input (Tauri events, or Web MIDI in a browser)
