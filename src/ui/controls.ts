@@ -5,6 +5,25 @@ export interface ParamControls {
   refresh(): void;
   /** Mark where modulation has pushed each slider. */
   showModulation(effective: Record<string, number | boolean | string>): void;
+  /** Name the routes pushing each parameter, e.g. "Kick +40%", under its control. */
+  showRoutes(labels: Record<string, string>): void;
+}
+
+/** Group headings the user has folded away, remembered across models and launches. */
+function loadCollapsed(): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem("ui:collapsedGroups") ?? "[]") as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsed(set: Set<string>): void {
+  try {
+    localStorage.setItem("ui:collapsedGroups", JSON.stringify([...set]));
+  } catch {
+    // Only a convenience.
+  }
 }
 
 /**
@@ -21,7 +40,32 @@ export function renderParamControls(
 ): ParamControls {
   container.replaceChildren();
   const refreshers: (() => void)[] = [];
+  const badges: Record<string, HTMLElement> = {};
   const sliders: { spec: Extract<ParamSpec, { kind: "number" }>; marker: HTMLElement; readout: HTMLElement; shown: boolean }[] = [];
+  // Parameters with a group go under a foldable heading, in the order groups first appear.
+  const groups = new Map<string, HTMLElement>();
+  const collapsed = loadCollapsed();
+  const parentFor = (group: string | undefined): HTMLElement => {
+    if (!group) return container;
+    let body = groups.get(group);
+    if (!body) {
+      const details = document.createElement("details");
+      details.className = "param-group";
+      details.open = !collapsed.has(group);
+      const summary = document.createElement("summary");
+      summary.textContent = group;
+      body = document.createElement("div");
+      details.append(summary, body);
+      details.addEventListener("toggle", () => {
+        if (details.open) collapsed.delete(group);
+        else collapsed.add(group);
+        saveCollapsed(collapsed);
+      });
+      container.append(details);
+      groups.set(group, body);
+    }
+    return body;
+  };
 
   for (const spec of specs) {
     const row = document.createElement("div");
@@ -108,11 +152,28 @@ export function renderParamControls(
       row.append(input, label);
     }
 
-    container.append(row);
+    const badge = document.createElement("div");
+    badge.className = "mod-badge";
+    badge.hidden = true;
+    badges[spec.key] = badge;
+    row.append(badge);
+    if (spec.description) {
+      const help = document.createElement("div");
+      help.className = "param-help";
+      help.textContent = spec.description;
+      row.append(help);
+    }
+    parentFor(spec.group).append(row);
   }
 
   return {
     refresh: () => refreshers.forEach((r) => r()),
+    showRoutes(labels) {
+      for (const key in badges) {
+        badges[key].textContent = labels[key] ? `♪ ${labels[key]}` : "";
+        badges[key].hidden = !labels[key];
+      }
+    },
     showModulation(effective) {
       for (const s of sliders) {
         const v = effective[s.spec.key] as number;

@@ -79,23 +79,29 @@ class WavesSim implements SimulationModel {
 
   step(dt: number, p: ParamValues): void {
     const { cols, rows, wall, absorb } = this;
-    const c2 = (p.speed as number) ** 2 * 0.5; // <= 0.5 keeps the scheme stable
-    const damping = 1 - (p.damping as number) * 0.01;
+    // The explicit scheme is only stable for c^2 <= 0.5 per step, so faster
+    // waves take more, smaller substeps instead of a bigger c.
+    const speed = Math.max(0.01, p.speed as number);
+    const subs = 2 * Math.ceil(speed);
+    const c2 = (speed / Math.ceil(speed)) ** 2 * 0.5;
+    // Damping is spread over the substeps so it is per second, whatever the speed.
+    const damping = 1 - (p.damping as number) * 0.02 / subs;
     const omega = (p.frequency as number) * Math.PI * 2;
-    for (let sub = 0; sub < 2; sub++) {
-      this.time += dt / 2;
-      const drive = Math.sin(this.time * omega);
+    const amp = p.amplitude as number;
+    for (let sub = 0; sub < subs; sub++) {
+      this.time += dt / subs;
+      const drive = Math.sin(this.time * omega) * amp;
       if (p.setup !== "open" && p.planeWave) {
         // A line source near the left edge, just inside the absorbing border.
         const x = SPONGE + 2;
-        for (let y = SPONGE; y < rows - SPONGE; y++) this.u[y * cols + x] = drive * 1.2;
+        for (let y = SPONGE; y < rows - SPONGE; y++) this.u[y * cols + x] = drive;
       }
       if (this.source) {
         const sx = Math.floor(this.source.x / this.cell), sy = Math.floor(this.source.y / this.cell);
         for (let oy = -1; oy <= 1; oy++) {
           for (let ox = -1; ox <= 1; ox++) {
             const x = sx + ox, y = sy + oy;
-            if (x > 0 && y > 0 && x < cols - 1 && y < rows - 1) this.u[y * cols + x] = drive * 2;
+            if (x > 0 && y > 0 && x < cols - 1 && y < rows - 1) this.u[y * cols + x] = drive * 1.7;
           }
         }
       }
@@ -131,13 +137,17 @@ class WavesSim implements SimulationModel {
     }
   }
 
-  onNote(ev: NoteEvent): void {
+  onNote(ev: NoteEvent, p: ParamValues): void {
     const w = this.cols * this.cell, h = this.rows * this.cell;
-    if (ev.role === "kick") this.drop(w * 0.6, h / 2, 9, 3 * ev.velocity);
-    else if (ev.role === "snare") this.drop(w * (0.45 + Math.random() * 0.45), h * (0.15 + Math.random() * 0.7), 5, 2 * ev.velocity);
-    else if (ev.role === "hat") this.drop(w * (0.45 + Math.random() * 0.45), h * (0.15 + Math.random() * 0.7), 2.5, ev.velocity);
+    const k = p.noteSize as number;
+    if (k <= 0) return;
+    // Bigger drops are wider as well as taller, so they read as bigger splashes.
+    const r = (base: number) => base * (0.6 + 0.4 * k);
+    if (ev.role === "kick") this.drop(w * 0.6, h / 2, r(9), 3 * ev.velocity * k);
+    else if (ev.role === "snare") this.drop(w * (0.45 + Math.random() * 0.45), h * (0.15 + Math.random() * 0.7), r(5), 2 * ev.velocity * k);
+    else if (ev.role === "hat") this.drop(w * (0.45 + Math.random() * 0.45), h * (0.15 + Math.random() * 0.7), r(2.5), ev.velocity * k);
     // Melody notes rain down on the right of the tank, placed by pitch.
-    else this.drop(w * (0.42 + ev.x * 0.5), h * (0.2 + noteHash(ev.note) * 0.6), 4 + ev.velocity * 3, 2.4 * ev.velocity);
+    else this.drop(w * (0.42 + ev.x * 0.5), h * (0.2 + noteHash(ev.note) * 0.6), r(4 + ev.velocity * 3), 2.4 * ev.velocity * k);
   }
 
   onPointer(input: PointerInput): void {
@@ -177,13 +187,14 @@ class WavesSim implements SimulationModel {
     }
   }
 
-  render(g: CanvasRenderingContext2D): void {
+  render(g: CanvasRenderingContext2D, _view: Viewport, p: ParamValues): void {
     if (!this.raster) return;
     const px = this.raster.pixels, { u, wall, lut } = this;
     const wallColor = 0xffd0c8c0;
+    const gain = p.contrast as number;
     for (let i = 0; i < u.length; i++) {
       if (wall[i]) { px[i] = wallColor; continue; }
-      const v = Math.max(-1, Math.min(1, u[i]));
+      const v = Math.max(-1, Math.min(1, u[i] * gain));
       px[i] = lut[((v + 1) * 127.5) | 0];
     }
     this.raster.draw(g, this.cols * this.cell, this.rows * this.cell, true);
@@ -202,8 +213,23 @@ export const waves: ModelDefinition = {
   hint: "Hold the mouse to make an oscillating source and drag it around. Right-drag or Shift-drag draws walls; Shift + right-drag erases them. Notes drop ripples into the tank; kicks make big ones.",
   fixedDt: 1 / 60,
   params: [
+    { kind: "boolean", key: "planeWave", label: "Plane wave source", default: true, group: "Motion",
+      description: "A wavemaker along the left edge sending straight wavefronts across the tank." },
+    { kind: "number", key: "frequency", label: "Frequency", min: 0.1, max: 16, step: 0.1, default: 3, group: "Motion",
+      description: "How fast the sources wobble. Higher packs the ripples closer together." },
+    { kind: "number", key: "amplitude", label: "Source strength", min: 0, max: 4, step: 0.05, default: 1.2, group: "Motion",
+      description: "How tall the waves from the wavemaker and your mouse are." },
+    { kind: "number", key: "speed", label: "Wave speed", min: 0.05, max: 2.5, step: 0.05, default: 0.9, group: "Motion",
+      description: "How fast ripples travel. Low is slow motion; high races across the tank." },
+    { kind: "number", key: "damping", label: "Damping", min: 0, max: 6, step: 0.05, default: 0.1, group: "Motion",
+      description: "How quickly ripples die away. High values leave only waves near their source." },
+    { kind: "number", key: "noteSize", label: "Note splash size", min: 0, max: 4, step: 0.05, default: 1, group: "Motion",
+      description: "How big the ripples dropped by notes and drums are. 0 turns them off." },
+    { kind: "number", key: "contrast", label: "Contrast", min: 0.2, max: 6, step: 0.05, default: 1, group: "Look",
+      description: "Brightens faint ripples. High values turn the tank into sharp bands." },
     {
-      kind: "choice", key: "setup", label: "Experiment", default: "double", resetOnChange: true,
+      kind: "choice", key: "setup", label: "Experiment", default: "double", resetOnChange: true, group: "Setup",
+      description: "Which walls the tank starts with. Changing it clears the water.",
       options: [
         { value: "double", label: "Double slit" },
         { value: "single", label: "Single slit" },
@@ -211,16 +237,26 @@ export const waves: ModelDefinition = {
         { value: "open", label: "Open water" },
       ],
     },
-    { kind: "boolean", key: "planeWave", label: "Plane wave source", default: true },
-    { kind: "number", key: "frequency", label: "Frequency", min: 0.5, max: 8, step: 0.1, default: 3 },
-    { kind: "number", key: "speed", label: "Wave speed", min: 0.2, max: 1, step: 0.05, default: 0.9 },
-    { kind: "number", key: "damping", label: "Damping", min: 0, max: 2, step: 0.05, default: 0.1 },
-    { kind: "number", key: "cellSize", label: "Cell size", min: 2, max: 8, step: 1, default: 4, resetOnChange: true },
+    { kind: "number", key: "cellSize", label: "Cell size", min: 2, max: 12, step: 1, default: 4, resetOnChange: true, group: "Setup",
+      description: "Size of each grid square. Small is sharp but slower; large is blocky and fast." },
   ],
   macros: [
-    { key: "chop", label: "Chop", targets: [{ param: "frequency", amount: 0.4 }] },
-    { key: "calm", label: "Calm", targets: [{ param: "damping", amount: 0.5 }] },
+    { key: "chop", label: "Chop", targets: [{ param: "frequency", amount: 0.5 }, { param: "amplitude", amount: 0.3 }] },
+    { key: "calm", label: "Calm", targets: [{ param: "damping", amount: 0.6 }, { param: "contrast", amount: -0.1 }] },
+    { key: "surge", label: "Surge", targets: [{ param: "speed", amount: 0.6 }, { param: "amplitude", amount: 0.5 }, { param: "contrast", amount: 0.4 }, { param: "noteSize", amount: 0.5 }] },
   ],
-  modulations: [{ source: "pitch", target: "frequency", amount: 0.3 }],
+  modulations: [
+    { source: "kick", target: "contrast", amount: 0.3 },
+    { source: "snare", target: "amplitude", amount: 0.3 },
+    { source: "pitch", target: "frequency", amount: 0.25 },
+    { source: "lfoBar", target: "speed", amount: 0.2 },
+    { source: "bass", target: "amplitude", amount: 0.4 },
+  ],
+  reactions: [
+    { role: "kick", text: "Drops a big ripple right of the slits" },
+    { role: "snare", text: "Drops a medium ripple at a random spot on the right" },
+    { role: "hat", text: "Drops a small ripple at a random spot on the right" },
+    { role: "tone", text: "Drops a ripple placed left to right by pitch" },
+  ],
   create: () => new WavesSim(),
 };

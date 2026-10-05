@@ -22,6 +22,7 @@ class BoidsSim implements SimulationModel {
   private hue = 160;
   private targetHue = 160;
   private flash = 0;
+  private scatter = 160;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -40,7 +41,10 @@ class BoidsSim implements SimulationModel {
     const r2 = radius * radius;
     const sepR2 = (radius * 0.4) ** 2;
     const maxSpeed = p.maxSpeed as number;
+    const wander = p.wander as number;
+    const lurePull = p.lure as number;
     const { width, height } = this.view;
+    this.scatter = p.scatter as number;
 
     const cell = Math.max(radius, 8);
     const cols = Math.ceil(width / cell) + 1;
@@ -82,10 +86,15 @@ class BoidsSim implements SimulationModel {
         fx += sx * (p.separation as number) * 1000;
         fy += sy * (p.separation as number) * 1000;
       }
+      if (wander > 0) {
+        // Random steering, so the flock frays and wobbles.
+        fx += (Math.random() - 0.5) * 2 * wander;
+        fy += (Math.random() - 0.5) * 2 * wander;
+      }
       for (const l of this.lures) {
         const dx = l.x - b.x, dy = l.y - b.y;
         const d = Math.hypot(dx, dy) + 1;
-        const s = (l.strength * l.life * 3000) / d;
+        const s = (l.strength * l.life * 3000 * lurePull) / d;
         fx += (dx / d) * s;
         fy += (dy / d) * s;
       }
@@ -132,8 +141,8 @@ class BoidsSim implements SimulationModel {
       for (const b of this.boids) {
         const dx = b.x - width / 2, dy = b.y - height / 2;
         const d = Math.hypot(dx, dy) + 1;
-        b.vx += (dx / d) * 160 * ev.velocity;
-        b.vy += (dy / d) * 160 * ev.velocity;
+        b.vx += (dx / d) * this.scatter * ev.velocity;
+        b.vy += (dy / d) * this.scatter * ev.velocity;
       }
       this.flash = ev.velocity;
     } else {
@@ -141,7 +150,8 @@ class BoidsSim implements SimulationModel {
     }
   }
 
-  render(g: CanvasRenderingContext2D): void {
+  render(g: CanvasRenderingContext2D, _view: Viewport, p: ParamValues): void {
+    const z = p.size as number;
     // Ease the flock's colour toward the last note's hue, the short way round.
     const dh = ((this.targetHue - this.hue + 540) % 360) - 180;
     this.hue = (this.hue + dh * 0.05 + 360) % 360;
@@ -151,9 +161,9 @@ class BoidsSim implements SimulationModel {
       const a = Math.atan2(b.vy, b.vx);
       const c = Math.cos(a), s = Math.sin(a);
       g.beginPath();
-      g.moveTo(b.x + c * 7, b.y + s * 7);
-      g.lineTo(b.x - c * 4 - s * 3.5, b.y - s * 4 + c * 3.5);
-      g.lineTo(b.x - c * 4 + s * 3.5, b.y - s * 4 - c * 3.5);
+      g.moveTo(b.x + c * 7 * z, b.y + s * 7 * z);
+      g.lineTo(b.x - (c * 4 + s * 3.5) * z, b.y - (s * 4 - c * 3.5) * z);
+      g.lineTo(b.x - (c * 4 - s * 3.5) * z, b.y - (s * 4 + c * 3.5) * z);
       g.closePath();
       g.fill();
     }
@@ -172,17 +182,44 @@ export const boids: ModelDefinition = {
   hint: "Hold the mouse to attract the flock. Right-click or Shift to scatter it. The flock chases notes and takes on their colour; kicks scatter it.",
   fixedDt: 1 / 60,
   params: [
-    { kind: "number", key: "count", label: "Boids", min: 10, max: 3000, step: 10, default: 600, resetOnChange: true },
-    { kind: "number", key: "radius", label: "Vision radius", min: 10, max: 120, step: 1, default: 40 },
-    { kind: "number", key: "separation", label: "Separation", min: 0, max: 5, step: 0.1, default: 1.5 },
-    { kind: "number", key: "alignment", label: "Alignment", min: 0, max: 5, step: 0.1, default: 1 },
-    { kind: "number", key: "cohesion", label: "Cohesion", min: 0, max: 5, step: 0.1, default: 0.8 },
-    { kind: "number", key: "maxSpeed", label: "Max speed", min: 20, max: 400, step: 5, default: 140 },
+    { kind: "number", key: "separation", label: "Separation", min: 0, max: 15, step: 0.1, default: 1.5, group: "Behaviour",
+      description: "How hard boids avoid crowding. High values spread the flock into a lattice." },
+    { kind: "number", key: "alignment", label: "Alignment", min: 0, max: 10, step: 0.1, default: 1, group: "Behaviour",
+      description: "How much boids match their neighbours' heading. High values form rivers." },
+    { kind: "number", key: "cohesion", label: "Cohesion", min: 0, max: 15, step: 0.1, default: 0.8, group: "Behaviour",
+      description: "How strongly boids steer to the middle of their group. High values make tight balls." },
+    { kind: "number", key: "radius", label: "Vision radius", min: 5, max: 200, step: 1, default: 40, group: "Behaviour",
+      description: "How far each boid can see. Small makes many little groups, large one big flock." },
+    { kind: "number", key: "maxSpeed", label: "Max speed", min: 20, max: 900, step: 5, default: 140, group: "Motion",
+      description: "Top speed. Boids never drop below about a third of it." },
+    { kind: "number", key: "wander", label: "Wander", min: 0, max: 1500, step: 10, default: 0, group: "Motion",
+      description: "Random steering that makes the flock jitter and fray apart." },
+    { kind: "number", key: "lure", label: "Note pull", min: 0, max: 5, step: 0.1, default: 1, group: "Motion",
+      description: "How strongly the flock chases each melody note." },
+    { kind: "number", key: "scatter", label: "Kick scatter", min: 0, max: 800, step: 10, default: 160, group: "Motion",
+      description: "How hard a kick drum blasts the flock outward from the centre." },
+    { kind: "number", key: "size", label: "Boid size", min: 0.4, max: 4, step: 0.1, default: 1, group: "Look",
+      description: "Size of each boid's arrow." },
+    { kind: "number", key: "count", label: "Boids", min: 10, max: 3000, step: 10, default: 600, resetOnChange: true, group: "Setup",
+      description: "How many boids. Rebuilds the flock." },
   ],
   macros: [
-    { key: "swarm", label: "Swarm", targets: [{ param: "cohesion", amount: 0.4 }, { param: "alignment", amount: 0.3 }] },
-    { key: "panic", label: "Panic", targets: [{ param: "separation", amount: 0.5 }, { param: "maxSpeed", amount: 0.4 }] },
+    { key: "swarm", label: "Swarm", targets: [{ param: "cohesion", amount: 0.6 }, { param: "alignment", amount: 0.4 }, { param: "separation", amount: -0.2 }, { param: "radius", amount: 0.3 }] },
+    { key: "panic", label: "Panic", targets: [{ param: "separation", amount: 0.6 }, { param: "maxSpeed", amount: 0.6 }, { param: "wander", amount: 0.6 }, { param: "alignment", amount: -0.5 }] },
+    { key: "school", label: "School", targets: [{ param: "alignment", amount: 0.9 }, { param: "radius", amount: 0.5 }, { param: "maxSpeed", amount: 0.3 }, { param: "cohesion", amount: -0.2 }] },
   ],
-  modulations: [{ source: "kick", target: "maxSpeed", amount: 0.2 }],
+  modulations: [
+    { source: "kick", target: "maxSpeed", amount: 0.4 },
+    { source: "snare", target: "wander", amount: 0.5 },
+    { source: "tone", target: "alignment", amount: 0.4 },
+    { source: "lfoBar", target: "cohesion", amount: 0.3 },
+    { source: "bass", target: "size", amount: 0.5 },
+  ],
+  reactions: [
+    { role: "tone", text: "The flock chases the note, placed by pitch, and takes its colour" },
+    { role: "kick", text: "Blasts the flock outward from the centre and flashes it" },
+    { role: "snare", text: "Flashes the flock brighter" },
+    { role: "hat", text: "Flashes the flock brighter" },
+  ],
   create: () => new BoidsSim(),
 };

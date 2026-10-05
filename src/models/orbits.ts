@@ -1,5 +1,6 @@
 import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { noteHue } from "./lib/music";
+import { gravityAt, gravityModeParam } from "./lib/gravity";
 
 interface Body {
   x: number;
@@ -18,7 +19,15 @@ interface Body {
 
 const BASE_GM = 4.5e6; // a 200px orbit around a 1x star moves at ~150 px/s
 const TRAIL_MAX = 600;
+/** Leapfrog substeps per frame at time scale 1; more at higher time scales so each step stays short. */
 const SUBSTEPS = 4;
+const MAX_SUBSTEPS = 16;
+/** Point fields (centre, corners...) fade out within this many pixels of their target so systems settle. */
+const FIELD_SOFT = 80;
+/** The soft edge cushion stars feel while a field is on: depth (px), spring and damping. */
+const EDGE_MARGIN = 60;
+const EDGE_K = 60;
+const EDGE_C = 6;
 
 /**
  * A planetary system: heavy stars and light planets under Newtonian
@@ -31,6 +40,9 @@ class OrbitsSim implements SimulationModel {
   private drag: { x0: number; y0: number; x: number; y: number; star: boolean } | null = null;
   private swallowed = 0;
   private pulse = 0;
+  private time = 0;
+  private fieldMode = "off";
+  private fieldG = 0;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -84,11 +96,32 @@ class OrbitsSim implements SimulationModel {
     );
   }
 
+  /**
+   * The outside field's pull on a star: the gravity-direction field, plus a soft, damped cushion
+   * near the edges so a dragged star eases to a stop instead of leaving the screen.
+   */
+  private starField(s: Body): [number, number] {
+    const { width: w, height: h } = this.view;
+    let [ax, ay] = gravityAt(this.fieldMode, this.fieldG, s.x, s.y, w, h, this.time, FIELD_SOFT);
+    const m = s.r + EDGE_MARGIN;
+    if (s.x < m) ax += EDGE_K * (m - s.x) - EDGE_C * Math.min(0, s.vx);
+    if (s.x > w - m) ax -= EDGE_K * (s.x - (w - m)) + EDGE_C * Math.max(0, s.vx);
+    if (s.y < m) ay += EDGE_K * (m - s.y) - EDGE_C * Math.min(0, s.vy);
+    if (s.y > h - m) ay -= EDGE_K * (s.y - (h - m)) + EDGE_C * Math.max(0, s.vy);
+    return [ax, ay];
+  }
+
   private accelerate(dt: number, mutual: boolean): void {
     const bs = this.bodies;
+    const fieldOn = this.fieldMode !== "off" && this.fieldG > 0;
+    // The outside field moves each star; every planet gets exactly its host star's pull, so a
+    // dragged system keeps its orbits instead of being torn apart against the edges.
+    const ext = new Map<Body, [number, number]>();
+    if (fieldOn) for (const b of bs) if (b.star) ext.set(b, this.starField(b));
     for (let i = 0; i < bs.length; i++) {
       const a = bs[i];
       let ax = 0, ay = 0;
+      let host: Body | null = null, hostPull = 0;
       for (let j = 0; j < bs.length; j++) {
         if (i === j) continue;
         const b = bs[j];
@@ -98,6 +131,15 @@ class OrbitsSim implements SimulationModel {
         const inv = b.gm / (d2 * Math.sqrt(d2));
         ax += dx * inv;
         ay += dy * inv;
+        if (fieldOn && b.star && b.gm / d2 > hostPull) { hostPull = b.gm / d2; host = b; }
+      }
+      if (fieldOn) {
+        const f = a.star ? ext.get(a) : host ? ext.get(host) : undefined;
+        if (f) { ax += f[0]; ay += f[1]; }
+        else if (!a.star) {
+          const [fx, fy] = gravityAt(this.fieldMode, this.fieldG, a.x, a.y, this.view.width, this.view.height, this.time, FIELD_SOFT);
+          ax += fx; ay += fy;
+        }
       }
       a.vx += ax * dt;
       a.vy += ay * dt;
@@ -105,9 +147,16 @@ class OrbitsSim implements SimulationModel {
   }
 
   step(dt: number, p: ParamValues): void {
-    const h = (dt * (p.timeScale as number)) / SUBSTEPS;
+    const ts = p.timeScale as number;
+    // Keep the substep no longer than at time scale 1 (up to a cap), so fast-forward stays accurate.
+    const substeps = Math.min(MAX_SUBSTEPS, Math.max(SUBSTEPS, Math.ceil(SUBSTEPS * ts)));
+    const h = (dt * ts) / substeps;
     const mutual = Boolean(p.mutual);
-    for (let s = 0; s < SUBSTEPS; s++) {
+    this.fieldMode = p.gravityMode as string;
+    this.fieldG = p.fieldGravity as number;
+    const fieldOn = this.fieldMode !== "off" && this.fieldG > 0;
+    for (let s = 0; s < substeps; s++) {
+      this.time += h;
       // Kick-drift-kick leapfrog.
       this.accelerate(h / 2, mutual);
       for (const b of this.bodies) { b.x += b.vx * h; b.y += b.vy * h; }
@@ -116,6 +165,16 @@ class OrbitsSim implements SimulationModel {
     }
 
     const { width: w, height: hgt } = this.view;
+    // Backstop for the edge cushion: a star rammed past it is stopped at the edge.
+    if (fieldOn) {
+      for (const b of this.bodies) {
+        if (!b.star) continue;
+        if (b.x < b.r) { b.x = b.r; b.vx = Math.max(0, b.vx); }
+        if (b.x > w - b.r) { b.x = w - b.r; b.vx = Math.min(0, b.vx); }
+        if (b.y < b.r) { b.y = b.r; b.vy = Math.max(0, b.vy); }
+        if (b.y > hgt - b.r) { b.y = hgt - b.r; b.vy = Math.min(0, b.vy); }
+      }
+    }
     this.bodies = this.bodies.filter((b) => b.star || (b.x > -w && b.x < 2 * w && b.y > -hgt && b.y < 2 * hgt));
     const trailLen = Math.min(TRAIL_MAX, p.trail as number);
     for (const b of this.bodies) {
@@ -191,6 +250,7 @@ class OrbitsSim implements SimulationModel {
     const stars = this.bodies.filter((b) => b.star);
     const pts = [px, py];
     const h = 1 / 240;
+    // Planets share their host star's outside pull, so the field drops out of the relative motion.
     for (let i = 0; i < 1200; i++) {
       for (const s of stars) {
         const dx = s.x - px, dy = s.y - py;
@@ -267,28 +327,62 @@ export const orbits: ModelDefinition = {
   id: "orbits",
   name: "Orbits",
   category: "Particle physics",
-  description: "Planets orbiting stars under Newtonian gravity, with trails. A dashed line previews where a launch will go.",
+  description: "Planets orbiting stars under Newtonian gravity, with trails. A dashed line previews where a launch will go. An optional gravity field can drag the whole system around.",
   hint: "Drag to launch a planet (the drag sets its velocity). Right-drag or Shift-drag launches a new star. Each note adds a planet, low notes on outer orbits.",
   fixedDt: 1 / 60,
   params: [
     {
-      kind: "choice", key: "system", label: "System", default: "planets", resetOnChange: true,
+      kind: "number", key: "timeScale", label: "Time scale", min: 0.05, max: 6, step: 0.05, default: 1, group: "Simulation",
+      description: "How fast time runs. High values whip planets round; low values slow everything to a crawl.",
+    },
+    {
+      kind: "boolean", key: "mutual", label: "Planets attract each other", default: false, group: "Gravity",
+      description: "Planets tug on each other as well as the stars, so orbits wobble and drift.",
+    },
+    gravityModeParam("off", undefined, {
+      description: "Drags whole systems around: stars and their planets move together, cushioned at the edges.",
+    }),
+    {
+      kind: "number", key: "fieldGravity", label: "Field strength", min: 0, max: 600, step: 5, default: 120, group: "Gravity",
+      description: "How hard the outside field drags the systems. Strong fields sling stars across the screen.",
+    },
+    {
+      kind: "number", key: "trail", label: "Trail length", min: 0, max: TRAIL_MAX, step: 10, default: 200, group: "Look",
+      description: "How long a tail each body leaves. Long trails draw the full orbit shapes.",
+    },
+    {
+      kind: "choice", key: "system", label: "System", default: "planets", resetOnChange: true, group: "Setup",
+      description: "Which system to start with. Changing it restarts the scene.",
       options: [
         { value: "planets", label: "Star with planets" },
         { value: "binary", label: "Binary star" },
         { value: "empty", label: "Lone star" },
       ],
     },
-    { kind: "number", key: "planets", label: "Planets", min: 0, max: 200, step: 1, default: 40, resetOnChange: true },
-    { kind: "number", key: "starMass", label: "Star mass", min: 0.2, max: 3, step: 0.1, default: 1, resetOnChange: true },
-    { kind: "number", key: "timeScale", label: "Time scale", min: 0.1, max: 4, step: 0.1, default: 1 },
-    { kind: "number", key: "trail", label: "Trail length", min: 0, max: TRAIL_MAX, step: 10, default: 200 },
-    { kind: "boolean", key: "mutual", label: "Planets attract each other", default: false },
+    {
+      kind: "number", key: "planets", label: "Planets", min: 0, max: 300, step: 1, default: 40, resetOnChange: true, group: "Setup",
+      description: "How many planets the system starts with.",
+    },
+    {
+      kind: "number", key: "starMass", label: "Star mass", min: 0.1, max: 8, step: 0.1, default: 1, resetOnChange: true, group: "Setup",
+      description: "How heavy the starting stars are. Heavier stars make faster, tighter orbits.",
+    },
   ],
   macros: [
-    { key: "warp", label: "Time warp", targets: [{ param: "timeScale", amount: 0.5 }] },
-    { key: "trails", label: "Long trails", targets: [{ param: "trail", amount: 0.7 }] },
+    { key: "warp", label: "Time warp", targets: [{ param: "timeScale", amount: 0.6 }, { param: "trail", amount: 0.2 }] },
+    { key: "trails", label: "Long trails", targets: [{ param: "trail", amount: 0.9 }, { param: "timeScale", amount: 0.1 }] },
   ],
-  modulations: [{ source: "kick", target: "timeScale", amount: 0.12 }],
+  modulations: [
+    { source: "kick", target: "timeScale", amount: 0.25 },
+    { source: "bass", target: "timeScale", amount: 0.2 },
+    { source: "lfoBar", target: "trail", amount: 0.4 },
+    { source: "snare", target: "fieldGravity", amount: 0.4 },
+  ],
+  reactions: [
+    { role: "kick", text: "Makes the stars pulse" },
+    { role: "snare", text: "Makes the stars pulse" },
+    { role: "hat", text: "Makes the stars pulse gently" },
+    { role: "tone", text: "Adds a planet coloured by pitch; low notes on outer orbits" },
+  ],
   create: () => new OrbitsSim(),
 };

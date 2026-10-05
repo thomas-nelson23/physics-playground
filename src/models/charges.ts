@@ -107,7 +107,7 @@ class ChargesSim implements SimulationModel {
   step(dt: number, p: ParamValues): void {
     const k = (p.strength as number) * 2e6;
     const drag = 1 - Math.min(1, (p.drag as number) * dt);
-    const maxV = 700;
+    const maxV = 900; // also caps each step at 15 px so probes can't tunnel through a charge
     const { width: w, height: h } = this.view;
     for (const pr of this.probes) {
       const [ex, ey] = this.field(pr.x, pr.y);
@@ -291,7 +291,24 @@ export const charges: ModelDefinition = {
   fixedDt: 1 / 60,
   params: [
     {
-      kind: "choice", key: "layout", label: "Layout", default: "dipole", resetOnChange: true,
+      kind: "number", key: "strength", label: "Field strength", min: 0.1, max: 15, step: 0.1, default: 1.5, group: "Forces",
+      description: "How hard the charges push probes. High values make probes race between charges.",
+    },
+    {
+      kind: "number", key: "drag", label: "Drag", min: 0, max: 20, step: 0.1, default: 2, group: "Forces",
+      description: "Slows the probes. Low lets them overshoot and swing; high makes them creep along the lines.",
+    },
+    {
+      kind: "boolean", key: "showPotential", label: "Show potential", default: true, group: "Look",
+      description: "Tints the background red near + charges and blue near - charges.",
+    },
+    {
+      kind: "boolean", key: "showLines", label: "Show field lines", default: true, group: "Look",
+      description: "Draws the lines the field follows from each + charge.",
+    },
+    {
+      kind: "choice", key: "layout", label: "Layout", default: "dipole", resetOnChange: true, group: "Setup",
+      description: "Which arrangement of charges to start with. Changing it restarts the scene.",
       options: [
         { value: "dipole", label: "Dipole" },
         { value: "quadrupole", label: "Quadrupole" },
@@ -300,16 +317,26 @@ export const charges: ModelDefinition = {
         { value: "empty", label: "Empty" },
       ],
     },
-    { kind: "number", key: "probes", label: "Probe particles", min: 0, max: 3000, step: 50, default: 1200, resetOnChange: true },
-    { kind: "number", key: "strength", label: "Field strength", min: 0.1, max: 5, step: 0.1, default: 1.5 },
-    { kind: "number", key: "drag", label: "Drag", min: 0, max: 10, step: 0.1, default: 2 },
-    { kind: "boolean", key: "showPotential", label: "Show potential", default: true },
-    { kind: "boolean", key: "showLines", label: "Show field lines", default: true },
+    {
+      kind: "number", key: "probes", label: "Probe particles", min: 0, max: 5000, step: 50, default: 1200, resetOnChange: true, group: "Setup",
+      description: "How many probe particles stream through the field.",
+    },
   ],
   macros: [
-    { key: "surge", label: "Surge", targets: [{ param: "strength", amount: 0.5 }, { param: "drag", amount: -0.15 }] },
-    { key: "syrup", label: "Syrup", targets: [{ param: "drag", amount: 0.6 }] },
+    { key: "surge", label: "Surge", targets: [{ param: "strength", amount: 0.6 }, { param: "drag", amount: -0.1 }] },
+    { key: "syrup", label: "Syrup", targets: [{ param: "drag", amount: 0.8 }, { param: "strength", amount: -0.1 }] },
   ],
-  modulations: [{ source: "kick", target: "strength", amount: 0.2 }],
+  modulations: [
+    { source: "kick", target: "strength", amount: 0.3 },
+    { source: "bass", target: "strength", amount: 0.25 },
+    { source: "snare", target: "drag", amount: -0.2 },
+    { source: "lfoBar", target: "drag", amount: 0.3 },
+  ],
+  reactions: [
+    { role: "kick", text: "Blows every probe outward from the centre" },
+    { role: "snare", text: "Fires a charge, spraying a ring of probes" },
+    { role: "hat", text: "Fires a charge, spraying a small ring of probes" },
+    { role: "tone", text: "Fires the charge at the pitch's position, left to right" },
+  ],
   create: () => new ChargesSim(),
 };

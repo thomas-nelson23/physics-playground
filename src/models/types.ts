@@ -7,34 +7,42 @@
  * describe its parameters and implement these methods.
  */
 
-export type ParamSpec =
+/** Fields every parameter kind shares. */
+interface ParamCommon {
+  key: string;
+  label: string;
+  /** One short sentence shown under the control, saying what it does. */
+  description?: string;
+  /**
+   * Sidebar heading the parameter is listed under, e.g. "Gravity" or "Look".
+   * Parameters with the same group are shown together, in the order the
+   * groups first appear.
+   */
+  group?: string;
+  /** Re-run `reset` when this parameter changes (e.g. particle count). */
+  resetOnChange?: boolean;
+}
+
+export type ParamSpec = ParamCommon &
+  (
   | {
       kind: "number";
-      key: string;
-      label: string;
       min: number;
       max: number;
       step: number;
       default: number;
-      /** Re-run `reset` when this parameter changes (e.g. particle count). */
-      resetOnChange?: boolean;
     }
   | {
       kind: "boolean";
-      key: string;
-      label: string;
       default: boolean;
-      resetOnChange?: boolean;
     }
   | {
       /** A dropdown of named options, e.g. a preset or a brush material. */
       kind: "choice";
-      key: string;
-      label: string;
       options: { value: string; label: string }[];
       default: string;
-      resetOnChange?: boolean;
-    };
+    }
+  );
 
 export type ParamValues = Record<string, number | boolean | string>;
 
@@ -95,6 +103,8 @@ export interface ModRoute {
   source: string;
   target: string;
   amount: number;
+  /** Switched off in the matrix but kept, so it can be turned back on. */
+  off?: boolean;
 }
 
 export interface SimulationModel {
@@ -131,6 +141,11 @@ export interface ModelDefinition {
   macros?: MacroSpec[];
   /** Modulation routes the model starts with, so music does something out of the box. */
   modulations?: ModRoute[];
+  /**
+   * What `onNote` does for each kind of hit, listed in the modulation matrix
+   * so the user can see (and switch off) the built-in reactions.
+   */
+  reactions?: { role: NoteRole; text: string }[];
   create(): SimulationModel;
 }
 

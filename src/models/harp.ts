@@ -59,19 +59,25 @@ class HarpSim implements SimulationModel {
     // A triangular pull, the shape of a plucked string just before release.
     for (let j = 1; j < POINTS - 1; j++) {
       const v = j <= k ? j / k : (POINTS - 1 - j) / (POINTS - 1 - k);
-      s.y[j] += v * amount;
-      s.prev[j] += v * amount;
+      // Clamp so repeated plucks on an undamped string can't grow without bound.
+      s.y[j] = Math.max(-250, Math.min(250, s.y[j] + v * amount));
+      s.prev[j] = Math.max(-250, Math.min(250, s.prev[j] + v * amount));
     }
     s.glow = Math.min(1, s.glow + Math.abs(amount) / 30);
     if (hue !== undefined) s.hue = hue;
   }
 
   step(_dt: number, p: ParamValues): void {
-    const damp = 1 - (p.damping as number) * 0.001;
+    // Each sub-step moves waves at most one grid point (c2 <= 0.98 keeps the
+    // explicit scheme inside its CFL limit), so the wave speed slider adds
+    // sub-steps rather than raising c2. Damping is per frame, so it means
+    // the same whatever the sub-step count.
+    const subs = Math.max(1, Math.round(p.speed as number));
+    const damp = Math.exp(-(p.damping as number) * 0.004 / subs);
     const tension = p.tension as number;
     for (const s of this.strings) {
       const c2 = Math.min(0.98, s.c2 * tension);
-      for (let sub = 0; sub < 4; sub++) {
+      for (let sub = 0; sub < subs; sub++) {
         const { y, prev, next } = s;
         for (let j = 1; j < POINTS - 1; j++) {
           next[j] = (2 * y[j] - prev[j] + c2 * (y[j - 1] - 2 * y[j] + y[j + 1])) * damp;
@@ -114,7 +120,8 @@ class HarpSim implements SimulationModel {
     } else if (input.type === "up") this.last = null;
   }
 
-  render(g: CanvasRenderingContext2D): void {
+  render(g: CanvasRenderingContext2D, _view: Viewport, p: ParamValues): void {
+    const thick = p.thickness as number;
     const { width: w, height: h } = this.view;
     // Frame of the harp.
     g.strokeStyle = "#30363d";
@@ -133,11 +140,11 @@ class HarpSim implements SimulationModel {
       const [x, top, bottom] = this.geometry(i);
       const seg = (bottom - top) / (POINTS - 1);
       if (s.glow > 0.02) {
-        g.lineWidth = 6;
+        g.lineWidth = 4 * thick;
         g.strokeStyle = `hsla(${s.hue} 90% 60% / ${s.glow * 0.25})`;
         this.trace(g, s, x, top, seg);
       }
-      g.lineWidth = 1.5 + s.glow;
+      g.lineWidth = thick * (1 + s.glow * 0.7);
       g.strokeStyle = `hsl(${s.hue} ${50 + s.glow * 40}% ${55 + s.glow * 25}%)`;
       this.trace(g, s, x, top, seg);
       g.fillStyle = "#8b949e";
@@ -170,15 +177,35 @@ export const harp: ModelDefinition = {
   hint: "Drag across the strings to strum them. The sequencer's eight melody rows map to the eight strings.",
   fixedDt: 1 / 60,
   params: [
-    { kind: "number", key: "strings", label: "Strings", min: 1, max: 24, step: 1, default: 8, resetOnChange: true },
-    { kind: "number", key: "pluck", label: "Pluck strength", min: 2, max: 60, step: 1, default: 26 },
-    { kind: "number", key: "tension", label: "Tension", min: 0.2, max: 1, step: 0.02, default: 0.7 },
-    { kind: "number", key: "damping", label: "Damping", min: 0, max: 10, step: 0.1, default: 1.5 },
+    { kind: "number", key: "pluck", label: "Pluck strength", min: 2, max: 150, step: 1, default: 30, group: "Behaviour",
+      description: "How far a note or strum pulls the string. High values whip strings across each other." },
+    { kind: "number", key: "tension", label: "Tension", min: 0.05, max: 1.4, step: 0.01, default: 0.7, group: "Behaviour",
+      description: "How tight the strings are. Slack strings wobble slowly; tight ones shiver fast." },
+    { kind: "number", key: "damping", label: "Damping", min: 0, max: 40, step: 0.1, default: 1.5, group: "Behaviour",
+      description: "How quickly a plucked string stops ringing. Zero rings forever." },
+    { kind: "number", key: "speed", label: "Wave speed", min: 1, max: 16, step: 1, default: 4, group: "Simulation",
+      description: "How fast kinks race up and down the strings." },
+    { kind: "number", key: "thickness", label: "String thickness", min: 0.5, max: 8, step: 0.1, default: 1.5, group: "Look",
+      description: "How thick the strings and their glow are drawn." },
+    { kind: "number", key: "strings", label: "Strings", min: 1, max: 24, step: 1, default: 8, resetOnChange: true, group: "Setup",
+      description: "How many strings the harp has. Melody notes spread across them by pitch." },
   ],
   macros: [
-    { key: "ring", label: "Ring out", targets: [{ param: "damping", amount: -0.15 }] },
-    { key: "slack", label: "Slack", targets: [{ param: "tension", amount: -0.5 }] },
+    { key: "ring", label: "Ring out", targets: [{ param: "damping", amount: -0.5 }, { param: "pluck", amount: 0.2 }] },
+    { key: "slack", label: "Slack", targets: [{ param: "tension", amount: -0.7 }, { param: "thickness", amount: 0.2 }] },
+    { key: "frenzy", label: "Frenzy", targets: [{ param: "speed", amount: 0.7 }, { param: "pluck", amount: 0.45 }] },
   ],
-  modulations: [{ source: "pitchbend", target: "tension", amount: 0.3 }],
+  modulations: [
+    { source: "kick", target: "thickness", amount: 0.4 },
+    { source: "snare", target: "tension", amount: -0.3 },
+    { source: "lfoBar", target: "speed", amount: 0.3 },
+    { source: "level", target: "pluck", amount: 0.35 },
+    { source: "pitchbend", target: "tension", amount: 0.3 },
+  ],
+  reactions: [
+    { role: "tone", text: "Plucks the string matching the note's pitch and colours it" },
+    { role: "kick", text: "Thumps the soundboard so every string jumps" },
+    { role: "snare", text: "Plucks a random string near its top end" },
+  ],
   create: () => new HarpSim(),
 };

@@ -122,7 +122,9 @@ canvas.addEventListener("pointermove", (e) => sendPointer("move", e));
 canvas.addEventListener("pointerup", (e) => sendPointer("up", e));
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
+/** Pausing the simulation pauses the music too, and playing resumes whatever was playing. */
 function setRunning(value: boolean): void {
+  if (value !== running) studio.setPaused(!value);
   running = value;
   playPause.textContent = running ? "Pause" : "Play";
   stepBtn.disabled = running;
@@ -150,7 +152,7 @@ function frame(now: number): void {
 
   const notes = studio.frame(now / 1000, elapsed);
   studio.apply(effective);
-  if (running && model.onNote) for (const n of notes) model.onNote(n, effective);
+  if (running && model.onNote) for (const n of notes) if (studio.reacts(n.role)) model.onNote(n, effective);
 
   if (running) {
     // Fixed-timestep integration keeps physics stable on 60Hz and 120Hz screens alike.
