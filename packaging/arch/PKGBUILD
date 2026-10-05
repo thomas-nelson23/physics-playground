@@ -9,7 +9,7 @@ pkgdesc="Interactive physics and algorithm visualizer"
 arch=('x86_64' 'aarch64')
 url="https://github.com/thomas-nelson23/physics-playground"
 license=('custom')
-depends=('webkit2gtk-4.1' 'gtk3' 'glib2' 'cairo' 'pango' 'gdk-pixbuf2' 'libsoup3' 'hicolor-icon-theme')
+depends=('webkit2gtk-4.1' 'gtk3' 'glib2' 'cairo' 'pango' 'gdk-pixbuf2' 'libsoup3' 'alsa-lib' 'hicolor-icon-theme')
 makedepends=('cargo' 'nodejs' 'npm' 'git')
 # makepkg's LTO flags break Rust/C mixed builds; debug split adds nothing here
 options=('!lto' '!debug')

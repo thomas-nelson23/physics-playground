@@ -1,10 +1,12 @@
-import type { ModelDefinition, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { Raster, rgb } from "./lib/raster";
 
 interface Charge {
   x: number;
   y: number;
   q: number;
+  /** 0..1 glow after a note fires this charge. */
+  flash?: number;
 }
 
 interface Probe {
@@ -147,6 +149,36 @@ class ChargesSim implements SimulationModel {
     }
   }
 
+  onNote(ev: NoteEvent): void {
+    const { width: w, height: h } = this.view;
+    if (ev.role === "kick") {
+      // Kicks blow every probe outward from the middle.
+      for (const pr of this.probes) {
+        const dx = pr.x - w / 2, dy = pr.y - h / 2;
+        const d = Math.hypot(dx, dy) + 1;
+        pr.vx += (dx / d) * 380 * ev.velocity;
+        pr.vy += (dy / d) * 380 * ev.velocity;
+      }
+      return;
+    }
+    if (this.charges.length === 0 || this.probes.length === 0) return;
+    // Notes fire the charge nearest their pitch position (left to right),
+    // spraying a ring of probes out of it.
+    const sorted = [...this.charges].sort((a, b) => a.x - b.x);
+    const c = sorted[Math.min(sorted.length - 1, Math.floor(ev.x * sorted.length))];
+    c.flash = ev.velocity;
+    const n = ev.role === "hat" ? 12 : 40;
+    for (let i = 0; i < n; i++) {
+      const pr = this.probes[(Math.random() * this.probes.length) | 0];
+      const a = (i / n) * Math.PI * 2;
+      pr.x = c.x + Math.cos(a) * (CHARGE_R + 3);
+      pr.y = c.y + Math.sin(a) * (CHARGE_R + 3);
+      pr.vx = Math.cos(a) * 500 * ev.velocity;
+      pr.vy = Math.sin(a) * 500 * ev.velocity;
+      pr.age = 0;
+    }
+  }
+
   private rebuild(): void {
     const { width: w, height: h } = this.view;
     const cols = Math.ceil(w / POT_CELL), rows = Math.ceil(h / POT_CELL);
@@ -223,6 +255,15 @@ class ChargesSim implements SimulationModel {
     g.lineCap = "butt";
 
     for (const c of this.charges) {
+      if (c.flash && c.flash > 0.02) {
+        g.beginPath();
+        g.arc(c.x, c.y, CHARGE_R + 4 + (1 - c.flash) * 30, 0, Math.PI * 2);
+        g.strokeStyle = `rgba(255,240,180,${c.flash})`;
+        g.lineWidth = 2;
+        g.stroke();
+        g.lineWidth = 1;
+        c.flash *= 0.9;
+      }
       g.beginPath();
       g.arc(c.x, c.y, CHARGE_R, 0, Math.PI * 2);
       g.fillStyle = c.q > 0 ? "hsl(0 75% 55%)" : "hsl(215 80% 55%)";
@@ -246,7 +287,7 @@ export const charges: ModelDefinition = {
   name: "Electric field",
   category: "Particle physics",
   description: "Point charges create a Coulomb field. Positive probe particles stream from + to - along the field lines.",
-  hint: "Click to place a + charge, right-click or Shift-click for a - charge. Drag charges to move them; right-click one to delete it.",
+  hint: "Click to place a + charge, right-click or Shift-click for a - charge. Drag charges to move them; right-click one to delete it. Notes make a charge spray probes, picked left to right by pitch.",
   fixedDt: 1 / 60,
   params: [
     {
@@ -265,5 +306,10 @@ export const charges: ModelDefinition = {
     { kind: "boolean", key: "showPotential", label: "Show potential", default: true },
     { kind: "boolean", key: "showLines", label: "Show field lines", default: true },
   ],
+  macros: [
+    { key: "surge", label: "Surge", targets: [{ param: "strength", amount: 0.5 }, { param: "drag", amount: -0.15 }] },
+    { key: "syrup", label: "Syrup", targets: [{ param: "drag", amount: 0.6 }] },
+  ],
+  modulations: [{ source: "kick", target: "strength", amount: 0.2 }],
   create: () => new ChargesSim(),
 };

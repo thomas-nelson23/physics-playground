@@ -1,5 +1,6 @@
-import type { ModelDefinition, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { Raster, hsl, rgb } from "./lib/raster";
+import { noteHue } from "./lib/music";
 
 /**
  * Jos Stam's "stable fluids": an incompressible velocity field advected
@@ -208,6 +209,32 @@ class FluidSim implements SimulationModel {
     }
   }
 
+  onNote(ev: NoteEvent, p: ParamValues): void {
+    const { w, h } = this;
+    const radius = Math.max(1.5, (p.brush as number) / this.cell);
+    const tint = (): [number, number, number] => {
+      if (p.colors !== "rainbow") return this.colour(p.colors as string);
+      const [r, g, b] = hsl(noteHue(ev.note), 0.9, 0.55);
+      return [r / 255, g / 255, b / 255];
+    };
+    if (ev.role === "tone") {
+      // A jet rising from the floor, placed left to right by pitch.
+      const c = tint().map((v) => v * 1.4 * ev.velocity) as [number, number, number];
+      this.splat(w * (0.1 + ev.x * 0.8), h * 0.88, 0, -260 * ev.velocity, c, radius);
+    } else if (ev.role === "kick") {
+      // A ring burst from the centre.
+      const c = tint().map((v) => v * 0.5 * ev.velocity) as [number, number, number];
+      for (let k = 0; k < 8; k++) {
+        const a = (k / 8) * Math.PI * 2 + this.time;
+        this.splat(w / 2 + Math.cos(a) * radius * 2, h / 2 + Math.sin(a) * radius * 2, Math.cos(a) * 200 * ev.velocity, Math.sin(a) * 200 * ev.velocity, c, radius * 0.7);
+      }
+    } else {
+      const a = Math.random() * Math.PI * 2;
+      const c = ev.role === "snare" ? tint().map((v) => v * 0.6) as [number, number, number] : null;
+      this.splat(Math.random() * w, Math.random() * h, Math.cos(a) * 150 * ev.velocity, Math.sin(a) * 150 * ev.velocity, c, radius * 0.5);
+    }
+  }
+
   onPointer(input: PointerInput): void {
     if (input.type === "up" || !input.pressed) {
       this.pointer = null;
@@ -245,7 +272,7 @@ export const fluid: ModelDefinition = {
   name: "Ink in water",
   category: "Waves & fluids",
   description: "An incompressible fluid (Stam's stable fluids) carrying coloured dye. Vorticity confinement keeps the curls crisp.",
-  hint: "Drag to stir in dye. Right-drag or Shift-drag stirs without adding dye.",
+  hint: "Drag to stir in dye. Right-drag or Shift-drag stirs without adding dye. Notes fire jets of dye from the floor, coloured and placed by pitch.",
   fixedDt: 1 / 60,
   params: [
     {
@@ -263,5 +290,10 @@ export const fluid: ModelDefinition = {
     { kind: "number", key: "brush", label: "Brush size", min: 8, max: 80, step: 1, default: 28 },
     { kind: "number", key: "cellSize", label: "Cell size", min: 4, max: 16, step: 1, default: 7, resetOnChange: true },
   ],
+  macros: [
+    { key: "swirl", label: "Swirl", targets: [{ param: "vorticity", amount: 0.5 }] },
+    { key: "linger", label: "Linger", targets: [{ param: "fade", amount: -0.15 }, { param: "viscosity", amount: -0.04 }] },
+  ],
+  modulations: [{ source: "env", target: "vorticity", amount: 0.25 }],
   create: () => new FluidSim(),
 };

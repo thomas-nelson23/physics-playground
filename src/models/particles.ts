@@ -1,4 +1,5 @@
-import type { ModelDefinition, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import { noteHue } from "./lib/music";
 
 interface Body {
   x: number;
@@ -19,6 +20,7 @@ class ParticleSim implements SimulationModel {
   private bodies: Body[] = [];
   private view: Viewport = { width: 1, height: 1 };
   private drag: { x0: number; y0: number; x: number; y: number } | null = null;
+  private flash = 0;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -141,10 +143,12 @@ class ParticleSim implements SimulationModel {
   }
 
   render(g: CanvasRenderingContext2D, _view: Viewport, p: ParamValues): void {
+    const light = 65 + this.flash * 20;
+    this.flash *= 0.9;
     for (const b of this.bodies) {
       g.beginPath();
       g.arc(b.x, b.y, b.r, 0, Math.PI * 2);
-      g.fillStyle = `hsl(${b.hue} 80% 65%)`;
+      g.fillStyle = `hsl(${b.hue} 80% ${light}%)`;
       g.fill();
       if (p.showVelocity) {
         g.beginPath();
@@ -166,6 +170,31 @@ class ParticleSim implements SimulationModel {
     }
   }
 
+  onNote(ev: NoteEvent, p: ParamValues): void {
+    const { width: w, height: h } = this.view;
+    if (ev.role === "kick" || ev.role === "snare") {
+      // A shockwave from the centre (kick) or a random spot (snare).
+      const cx = ev.role === "kick" ? w / 2 : Math.random() * w;
+      const cy = ev.role === "kick" ? h / 2 : Math.random() * h;
+      const force = (ev.role === "kick" ? 260 : 140) * ev.velocity;
+      for (const b of this.bodies) {
+        const dx = b.x - cx, dy = b.y - cy;
+        const d = Math.hypot(dx, dy) + 30;
+        const f = (force * 120) / d;
+        b.vx += (dx / d) * f;
+        b.vy += (dy / d) * f;
+      }
+      this.flash = Math.max(this.flash, ev.velocity);
+    } else if (ev.role === "tone") {
+      // Each note drops a body coloured by its pitch, from the top, across the width by pitch.
+      const body = this.makeBody(w * (0.08 + ev.x * 0.84), 10, (Math.random() - 0.5) * 40, 120 + ev.velocity * 260, 1 + ev.velocity * 5);
+      body.hue = noteHue(ev.note);
+      this.bodies.push(body);
+      const max = Math.max(20, (p.count as number) * 1.5);
+      if (this.bodies.length > max) this.bodies.splice(0, this.bodies.length - max);
+    }
+  }
+
   stats(): string {
     return `${this.bodies.length} bodies`;
   }
@@ -176,7 +205,7 @@ export const particles: ModelDefinition = {
   name: "Particles & gravity",
   category: "Particle physics",
   description: "Bodies that attract each other, collide elastically, and bounce off the walls.",
-  hint: "Drag on the canvas to fling a new body. Hold Shift for a heavy one.",
+  hint: "Drag on the canvas to fling a new body. Hold Shift for a heavy one. Notes drop bodies coloured by pitch; kicks send out a shockwave.",
   fixedDt: 1 / 120,
   params: [
     { kind: "number", key: "count", label: "Bodies", min: 0, max: 600, step: 10, default: 150, resetOnChange: true },
@@ -188,5 +217,10 @@ export const particles: ModelDefinition = {
     { kind: "boolean", key: "walls", label: "Walls", default: true },
     { kind: "boolean", key: "showVelocity", label: "Show velocity", default: false },
   ],
+  macros: [
+    { key: "attract", label: "Attraction", targets: [{ param: "gravity", amount: 0.6 }, { param: "damping", amount: 0.15 }] },
+    { key: "bounce", label: "Bounce", targets: [{ param: "restitution", amount: 0.3 }, { param: "downwardGravity", amount: 0.5 }] },
+  ],
+  modulations: [{ source: "bass", target: "gravity", amount: 0.3 }],
   create: () => new ParticleSim(),
 };

@@ -1,4 +1,5 @@
-import type { ModelDefinition, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import { noteHash, noteHue } from "./lib/music";
 
 interface Boid {
   x: number;
@@ -16,6 +17,11 @@ class BoidsSim implements SimulationModel {
   private boids: Boid[] = [];
   private view: Viewport = { width: 1, height: 1 };
   private pointer: { x: number; y: number; repel: boolean } | null = null;
+  /** Short-lived pulls toward where recent notes landed. */
+  private lures: { x: number; y: number; life: number; strength: number }[] = [];
+  private hue = 160;
+  private targetHue = 160;
+  private flash = 0;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -76,6 +82,13 @@ class BoidsSim implements SimulationModel {
         fx += sx * (p.separation as number) * 1000;
         fy += sy * (p.separation as number) * 1000;
       }
+      for (const l of this.lures) {
+        const dx = l.x - b.x, dy = l.y - b.y;
+        const d = Math.hypot(dx, dy) + 1;
+        const s = (l.strength * l.life * 3000) / d;
+        fx += (dx / d) * s;
+        fy += (dy / d) * s;
+      }
       if (this.pointer) {
         const dx = this.pointer.x - b.x;
         const dy = this.pointer.y - b.y;
@@ -92,6 +105,9 @@ class BoidsSim implements SimulationModel {
       else if (speed < minSpeed && speed > 0) { b.vx *= minSpeed / speed; b.vy *= minSpeed / speed; }
     }
 
+    for (const l of this.lures) l.life -= dt * 1.5;
+    this.lures = this.lures.filter((l) => l.life > 0);
+
     for (const b of this.boids) {
       b.x = (b.x + b.vx * dt + width) % width;
       b.y = (b.y + b.vy * dt + height) % height;
@@ -104,8 +120,33 @@ class BoidsSim implements SimulationModel {
       : null;
   }
 
+  onNote(ev: NoteEvent): void {
+    const { width, height } = this.view;
+    if (ev.role === "tone") {
+      // The flock chases each note: left to right by pitch, and turns its colour.
+      this.lures.push({ x: width * (0.1 + ev.x * 0.8), y: height * (0.2 + noteHash(ev.note) * 0.6), life: 1, strength: ev.velocity });
+      if (this.lures.length > 6) this.lures.shift();
+      this.targetHue = noteHue(ev.note);
+    } else if (ev.role === "kick") {
+      // Scatter outward from the centre.
+      for (const b of this.boids) {
+        const dx = b.x - width / 2, dy = b.y - height / 2;
+        const d = Math.hypot(dx, dy) + 1;
+        b.vx += (dx / d) * 160 * ev.velocity;
+        b.vy += (dy / d) * 160 * ev.velocity;
+      }
+      this.flash = ev.velocity;
+    } else {
+      this.flash = Math.max(this.flash, ev.velocity * 0.5);
+    }
+  }
+
   render(g: CanvasRenderingContext2D): void {
-    g.fillStyle = "hsl(160 70% 60%)";
+    // Ease the flock's colour toward the last note's hue, the short way round.
+    const dh = ((this.targetHue - this.hue + 540) % 360) - 180;
+    this.hue = (this.hue + dh * 0.05 + 360) % 360;
+    g.fillStyle = `hsl(${this.hue} 70% ${60 + this.flash * 25}%)`;
+    this.flash *= 0.9;
     for (const b of this.boids) {
       const a = Math.atan2(b.vy, b.vx);
       const c = Math.cos(a), s = Math.sin(a);
@@ -128,7 +169,7 @@ export const boids: ModelDefinition = {
   name: "Flocking (boids)",
   category: "Algorithmic",
   description: "Agents following separation, alignment and cohesion rules form emergent flocks.",
-  hint: "Hold the mouse to attract the flock. Right-click or Shift to scatter it.",
+  hint: "Hold the mouse to attract the flock. Right-click or Shift to scatter it. The flock chases notes and takes on their colour; kicks scatter it.",
   fixedDt: 1 / 60,
   params: [
     { kind: "number", key: "count", label: "Boids", min: 10, max: 3000, step: 10, default: 600, resetOnChange: true },
@@ -138,5 +179,10 @@ export const boids: ModelDefinition = {
     { kind: "number", key: "cohesion", label: "Cohesion", min: 0, max: 5, step: 0.1, default: 0.8 },
     { kind: "number", key: "maxSpeed", label: "Max speed", min: 20, max: 400, step: 5, default: 140 },
   ],
+  macros: [
+    { key: "swarm", label: "Swarm", targets: [{ param: "cohesion", amount: 0.4 }, { param: "alignment", amount: 0.3 }] },
+    { key: "panic", label: "Panic", targets: [{ param: "separation", amount: 0.5 }, { param: "maxSpeed", amount: 0.4 }] },
+  ],
+  modulations: [{ source: "kick", target: "maxSpeed", amount: 0.2 }],
   create: () => new BoidsSim(),
 };

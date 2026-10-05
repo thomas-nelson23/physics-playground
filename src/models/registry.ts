@@ -11,6 +11,10 @@ import { life } from "./life";
 import { reaction } from "./reaction";
 import { sand } from "./sand";
 import { slime } from "./slime";
+import { chladni } from "./chladni";
+import { harmonograph } from "./harmonograph";
+import { harp } from "./harp";
+import { fireflies } from "./fireflies";
 
 /**
  * Every model the app offers. To add a model, create a file in this folder
@@ -22,6 +26,7 @@ export const models: ModelDefinition[] = [
   cloth, pendulum,
   waves, fluid,
   boids, life, reaction, sand, slime,
+  chladni, harmonograph, harp, fireflies,
 ];
 
 export function findModel(id: string): ModelDefinition | undefined {

@@ -1,4 +1,4 @@
-import type { ModelDefinition, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { Raster, rgb } from "./lib/raster";
 
 const EMPTY = 0, SAND = 1, WATER = 2, WALL = 3, PLANT = 4, FIRE = 5, SMOKE = 6, LAVA = 7, STEAM = 8, STONE = 9;
@@ -201,8 +201,11 @@ class SandSim implements SimulationModel {
   private paint(p: ParamValues): void {
     if (!this.brush) return;
     const material = this.brush.erase ? EMPTY : BRUSH[p.material as string] ?? SAND;
-    const cx = this.brush.x / this.cell, cy = this.brush.y / this.cell;
-    const r = (p.brush as number) / this.cell;
+    this.pour(this.brush.x / this.cell, this.brush.y / this.cell, (p.brush as number) / this.cell, material);
+  }
+
+  /** Fill a disc (in grid cells) with a material. Loose materials sprinkle. */
+  private pour(cx: number, cy: number, r: number, material: number): void {
     const solid = material === WALL || material === EMPTY || material === PLANT;
     for (let y = Math.floor(cy - r); y <= cy + r; y++) {
       for (let x = Math.floor(cx - r); x <= cx + r; x++) {
@@ -215,6 +218,25 @@ class SandSim implements SimulationModel {
         this.grid[i] = material;
         this.life[i] = material === FIRE ? 40 + ((Math.random() * 60) | 0) : 0;
       }
+    }
+  }
+
+  onNote(ev: NoteEvent, p: ParamValues): void {
+    // Keep a song from filling the whole world.
+    let filled = 0;
+    for (let i = 0; i < this.grid.length; i += 7) if (this.grid[i] !== EMPTY) filled++;
+    if (filled * 7 > this.grid.length * 0.6) return;
+    const { w, h } = this;
+    const r = 1.5 + ev.velocity * 3;
+    if (ev.role === "tone") {
+      // Notes pour the brush material from the top, left to right by pitch.
+      const m = BRUSH[p.material as string] || SAND;
+      this.pour(w * (0.05 + ev.x * 0.9), 3, r, m === WALL || m === PLANT ? SAND : m);
+    } else if (ev.role === "kick") {
+      this.pour(w * (0.2 + Math.random() * 0.6), 3, r + 1, WATER);
+    } else if (ev.role === "snare") {
+      // A spark that lands on whatever is below and may set plants alight.
+      this.pour(Math.random() * w, h * (0.3 + Math.random() * 0.5), 1.2, FIRE);
     }
   }
 
@@ -253,7 +275,7 @@ export const sand: ModelDefinition = {
   name: "Falling sand",
   category: "Algorithmic",
   description: "A falling-sand world: sand piles, water flows, plants drink water and burn, lava boils water into steam that rains back down.",
-  hint: "Drag to pour the chosen material. Right-drag or Shift-drag erases.",
+  hint: "Drag to pour the chosen material. Right-drag or Shift-drag erases. Notes pour the chosen material from the top, kicks pour water, snares throw sparks.",
   fixedDt: 1 / 60,
   params: [
     {
@@ -272,6 +294,10 @@ export const sand: ModelDefinition = {
     { kind: "number", key: "speed", label: "Updates per frame", min: 1, max: 4, step: 1, default: 2 },
     { kind: "number", key: "cellSize", label: "Grain size", min: 2, max: 8, step: 1, default: 4, resetOnChange: true },
     { kind: "boolean", key: "scene", label: "Start with a scene", default: true, resetOnChange: true },
+  ],
+  macros: [
+    { key: "rush", label: "Fast forward", targets: [{ param: "speed", amount: 0.67 }] },
+    { key: "pour", label: "Brush size", targets: [{ param: "brush", amount: 0.5 }] },
   ],
   create: () => new SandSim(),
 };
