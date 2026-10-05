@@ -1,4 +1,4 @@
-import type { ModelDefinition, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 
 const BUCKETS = 6;
 
@@ -24,6 +24,7 @@ class ClothSim implements SimulationModel {
   private pointer = { x: 0, y: 0 };
   private time = 0;
   private torn = 0;
+  private gustSide = 1;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -122,6 +123,36 @@ class ClothSim implements SimulationModel {
     if (this.cutter) this.cut(this.cutter.x, this.cutter.y, 14);
   }
 
+  /** Give every free point a velocity kick (Verlet velocity is x - px). */
+  private impulse(fx: (x: number, y: number) => [number, number]): void {
+    for (let k = 0; k < this.n; k++) {
+      if (this.pinned[k]) continue;
+      const [dx, dy] = fx(this.x[k], this.y[k]);
+      this.px[k] -= dx;
+      this.py[k] -= dy;
+    }
+  }
+
+  onNote(ev: NoteEvent): void {
+    const { width: w, height: h } = this.view;
+    if (ev.role === "kick") {
+      // A gust that alternates direction on each kick.
+      this.gustSide = -this.gustSide;
+      const s = 9 * ev.velocity * this.gustSide;
+      this.impulse((_x, y) => [s * (0.6 + 0.4 * Math.sin(y * 0.03)), -2 * ev.velocity]);
+    } else if (ev.role === "snare") {
+      this.impulse(() => [(Math.random() - 0.5) * 4 * ev.velocity, (Math.random() - 0.5) * 4 * ev.velocity]);
+    } else if (ev.role === "tone") {
+      // Notes pluck the cloth where they land: low notes left, high notes right.
+      const cx = w * (0.2 + ev.x * 0.6), cy = h * 0.4, r = 70;
+      this.impulse((x, y) => {
+        const d2 = (x - cx) ** 2 + (y - cy) ** 2;
+        const f = Math.exp(-d2 / (r * r)) * 10 * ev.velocity;
+        return [0, -f];
+      });
+    }
+  }
+
   private cut(cx: number, cy: number, r: number): void {
     const { x, y, ca, cb, alive } = this;
     for (let c = 0; c < ca.length; c++) {
@@ -193,7 +224,7 @@ export const cloth: ModelDefinition = {
   name: "Cloth",
   category: "Mechanics",
   description: "A sheet of fabric simulated with Verlet integration and distance constraints. Links glow red as they stretch and snap past the tear limit.",
-  hint: "Drag to grab and pull the cloth. Right-drag or Shift-drag to slice it.",
+  hint: "Drag to grab and pull the cloth. Right-drag or Shift-drag to slice it. Kicks blow gusts; notes pluck the cloth left to right by pitch.",
   fixedDt: 1 / 60,
   params: [
     {
@@ -211,5 +242,10 @@ export const cloth: ModelDefinition = {
     { kind: "number", key: "tearLimit", label: "Tear limit (x rest length)", min: 1.5, max: 8, step: 0.1, default: 3.5 },
     { kind: "boolean", key: "tearable", label: "Tearable", default: true },
   ],
+  macros: [
+    { key: "storm", label: "Storm", targets: [{ param: "wind", amount: 0.35 }] },
+    { key: "float", label: "Weightless", targets: [{ param: "gravity", amount: -0.35 }] },
+  ],
+  modulations: [{ source: "lfoBar", target: "wind", amount: 0.08 }],
   create: () => new ClothSim(),
 };

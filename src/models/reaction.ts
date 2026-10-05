@@ -1,4 +1,5 @@
-import type { ModelDefinition, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import { noteHash } from "./lib/music";
 import { Raster, palette } from "./lib/raster";
 
 /** Feed and kill rates for well-known Gray–Scott regimes. */
@@ -116,6 +117,23 @@ class ReactionSim implements SimulationModel {
     this.steps += iters;
   }
 
+  onNote(ev: NoteEvent): void {
+    const { w, h } = this;
+    if (ev.role === "tone") {
+      this.paint(w * (0.05 + ev.x * 0.9), h * (0.1 + noteHash(ev.note) * 0.8), 2 + ev.velocity * 4, false);
+    } else if (ev.role === "kick") {
+      // A thin ring of chemical B around the centre, which grows outward.
+      const r = Math.min(w, h) * (0.15 + Math.random() * 0.2);
+      for (let k = 0; k < 24; k++) {
+        const a = (k / 24) * Math.PI * 2;
+        this.paint(w / 2 + Math.cos(a) * r, h / 2 + Math.sin(a) * r, 1.5 + ev.velocity, false);
+      }
+    } else if (ev.role === "snare") {
+      // Snares wipe a hole the pattern has to regrow into.
+      this.paint(Math.random() * w, Math.random() * h, 4 + ev.velocity * 6, true);
+    }
+  }
+
   onPointer(input: PointerInput): void {
     this.brush = input.pressed && input.type !== "up"
       ? { x: input.x, y: input.y, erase: input.button === 2 || input.shift }
@@ -143,7 +161,7 @@ export const reaction: ModelDefinition = {
   name: "Reaction–diffusion",
   category: "Algorithmic",
   description: "Gray–Scott chemistry: two diffusing chemicals grow coral, spots, mazes and dividing cells, like Turing's animal-skin patterns.",
-  hint: "Drag to drop chemical B and grow new patterns. Right-drag or Shift-drag to wipe an area clean.",
+  hint: "Drag to drop chemical B and grow new patterns. Right-drag or Shift-drag to wipe an area clean. Notes seed new growth by pitch, kicks seed rings, snares wipe holes.",
   fixedDt: 1 / 60,
   params: [
     {
@@ -170,5 +188,9 @@ export const reaction: ModelDefinition = {
     { kind: "number", key: "brush", label: "Brush size", min: 4, max: 60, step: 1, default: 14 },
     { kind: "number", key: "cellSize", label: "Cell size", min: 2, max: 8, step: 1, default: 4, resetOnChange: true },
   ],
+  macros: [
+    { key: "grow", label: "Growth", targets: [{ param: "speed", amount: 0.5 }] },
+  ],
+  modulations: [{ source: "env", target: "speed", amount: 0.3 }],
   create: () => new ReactionSim(),
 };

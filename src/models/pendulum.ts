@@ -1,4 +1,4 @@
-import type { ModelDefinition, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 
 const TRAIL_MAX = 400;
 const SUBSTEPS = 4;
@@ -19,6 +19,7 @@ class PendulumSim implements SimulationModel {
   private aim: { x: number; y: number } | null = null;
   private start = { a1: 2.2, a2: 2.4 };
   private time = 0;
+  private flash = 0;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -106,8 +107,21 @@ class PendulumSim implements SimulationModel {
     }
   }
 
+  onNote(ev: NoteEvent): void {
+    // Kicks swing the upper arms, notes flick the lower arms (left or right by pitch).
+    const s = this.s;
+    for (let i = 0; i < this.count; i++) {
+      if (ev.role === "kick") s[i * 4 + 1] += 2.2 * ev.velocity * Math.sign(s[i * 4 + 1] || 1);
+      else if (ev.role === "tone") s[i * 4 + 3] += (ev.x - 0.5) * 7 * ev.velocity;
+      else if (ev.role === "snare") s[i * 4 + 3] *= -1;
+    }
+    this.flash = Math.max(this.flash, ev.velocity);
+  }
+
   render(g: CanvasRenderingContext2D, _view: Viewport, p: ParamValues): void {
     const [cx, cy, L] = this.pivot();
+    const glow = this.flash;
+    this.flash *= 0.88;
     const trailLen = Math.min(this.filled, p.trail as number);
     const hue = (i: number) => (this.count === 1 ? 190 : 200 + (i / (this.count - 1)) * 160);
 
@@ -135,9 +149,9 @@ class PendulumSim implements SimulationModel {
       g.lineTo(x1, y1);
       g.lineTo(x2, y2);
       g.stroke();
-      g.fillStyle = `hsl(${hue(i)} 90% 70%)`;
+      g.fillStyle = `hsl(${hue(i)} 90% ${70 + glow * 20}%)`;
       g.beginPath();
-      g.arc(x2, y2, 4, 0, Math.PI * 2);
+      g.arc(x2, y2, 4 + glow * 4, 0, Math.PI * 2);
       g.fill();
     }
     g.lineWidth = 1;
@@ -176,7 +190,7 @@ export const pendulum: ModelDefinition = {
   name: "Chaotic pendulums",
   category: "Mechanics",
   description: "A fan of double pendulums released a hair's breadth apart. They swing as one, then chaos tears them into a rainbow.",
-  hint: "Drag to aim the arms, release to drop every pendulum from that angle.",
+  hint: "Drag to aim the arms, release to drop every pendulum from that angle. Kicks swing the arms; notes flick them left or right by pitch.",
   fixedDt: 1 / 120,
   params: [
     { kind: "number", key: "count", label: "Pendulums", min: 1, max: 200, step: 1, default: 60, resetOnChange: true },
@@ -186,5 +200,10 @@ export const pendulum: ModelDefinition = {
     { kind: "number", key: "damping", label: "Friction", min: 0, max: 1, step: 0.01, default: 0 },
     { kind: "number", key: "trail", label: "Trail length", min: 0, max: TRAIL_MAX, step: 10, default: 60 },
   ],
+  macros: [
+    { key: "heavy", label: "Heavy", targets: [{ param: "gravity", amount: 0.4 }, { param: "massRatio", amount: 0.3 }] },
+    { key: "settle", label: "Settle", targets: [{ param: "damping", amount: 0.6 }] },
+  ],
+  modulations: [{ source: "lfoBar", target: "massRatio", amount: 0.15 }],
   create: () => new PendulumSim(),
 };

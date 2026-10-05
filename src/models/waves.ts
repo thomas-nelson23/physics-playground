@@ -1,4 +1,5 @@
-import type { ModelDefinition, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import { noteHash } from "./lib/music";
 import { Raster, palette } from "./lib/raster";
 
 const SPONGE = 14; // cells of absorbing border so waves leave instead of echoing
@@ -113,6 +114,32 @@ class WavesSim implements SimulationModel {
     }
   }
 
+  /** Lift a smooth bump of water; it spreads out as a ring. */
+  private drop(px: number, py: number, radius: number, height: number): void {
+    const { cols, rows } = this;
+    const cx = px / this.cell, cy = py / this.cell;
+    for (let y = Math.max(1, Math.floor(cy - radius)); y < Math.min(rows - 1, cy + radius); y++) {
+      for (let x = Math.max(1, Math.floor(cx - radius)); x < Math.min(cols - 1, cx + radius); x++) {
+        const d = Math.hypot(x - cx, y - cy) / radius;
+        if (d >= 1) continue;
+        const i = y * cols + x;
+        if (this.wall[i]) continue;
+        const v = height * 0.5 * (1 + Math.cos(Math.PI * d));
+        this.u[i] += v;
+        this.prev[i] += v;
+      }
+    }
+  }
+
+  onNote(ev: NoteEvent): void {
+    const w = this.cols * this.cell, h = this.rows * this.cell;
+    if (ev.role === "kick") this.drop(w * 0.6, h / 2, 9, 3 * ev.velocity);
+    else if (ev.role === "snare") this.drop(w * (0.45 + Math.random() * 0.45), h * (0.15 + Math.random() * 0.7), 5, 2 * ev.velocity);
+    else if (ev.role === "hat") this.drop(w * (0.45 + Math.random() * 0.45), h * (0.15 + Math.random() * 0.7), 2.5, ev.velocity);
+    // Melody notes rain down on the right of the tank, placed by pitch.
+    else this.drop(w * (0.42 + ev.x * 0.5), h * (0.2 + noteHash(ev.note) * 0.6), 4 + ev.velocity * 3, 2.4 * ev.velocity);
+  }
+
   onPointer(input: PointerInput): void {
     const erase = input.shift && input.button === 2;
     const drawWall = input.button === 2 || input.shift;
@@ -172,7 +199,7 @@ export const waves: ModelDefinition = {
   name: "Ripple tank",
   category: "Waves & fluids",
   description: "The 2D wave equation. Watch diffraction and interference through slits, or focus plane waves with a parabolic mirror.",
-  hint: "Hold the mouse to make an oscillating source and drag it around. Right-drag or Shift-drag draws walls; Shift + right-drag erases them.",
+  hint: "Hold the mouse to make an oscillating source and drag it around. Right-drag or Shift-drag draws walls; Shift + right-drag erases them. Notes drop ripples into the tank; kicks make big ones.",
   fixedDt: 1 / 60,
   params: [
     {
@@ -190,5 +217,10 @@ export const waves: ModelDefinition = {
     { kind: "number", key: "damping", label: "Damping", min: 0, max: 2, step: 0.05, default: 0.1 },
     { kind: "number", key: "cellSize", label: "Cell size", min: 2, max: 8, step: 1, default: 4, resetOnChange: true },
   ],
+  macros: [
+    { key: "chop", label: "Chop", targets: [{ param: "frequency", amount: 0.4 }] },
+    { key: "calm", label: "Calm", targets: [{ param: "damping", amount: 0.5 }] },
+  ],
+  modulations: [{ source: "pitch", target: "frequency", amount: 0.3 }],
   create: () => new WavesSim(),
 };

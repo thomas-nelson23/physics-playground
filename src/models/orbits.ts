@@ -1,4 +1,5 @@
-import type { ModelDefinition, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import { noteHue } from "./lib/music";
 
 interface Body {
   x: number;
@@ -29,6 +30,7 @@ class OrbitsSim implements SimulationModel {
   private view: Viewport = { width: 1, height: 1 };
   private drag: { x0: number; y0: number; x: number; y: number; star: boolean } | null = null;
   private swallowed = 0;
+  private pulse = 0;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -159,6 +161,28 @@ class OrbitsSim implements SimulationModel {
     }
   }
 
+  onNote(ev: NoteEvent): void {
+    if (ev.role !== "tone") {
+      // Drums make the stars pulse.
+      this.pulse = Math.max(this.pulse, ev.velocity * (ev.role === "hat" ? 0.4 : 1));
+      return;
+    }
+    // A note births a planet on a circular orbit: low notes far out, high notes close in.
+    const star = this.bodies.find((b) => b.star);
+    if (!star) return;
+    const span = Math.min(this.view.width, this.view.height) * 0.45;
+    const r = span * (0.95 - ev.x * 0.75);
+    const before = this.bodies.length;
+    this.addCircular(star.x, star.y, r, star.gm);
+    const planet = this.bodies[before];
+    planet.vx += star.vx;
+    planet.vy += star.vy;
+    planet.hue = noteHue(ev.note);
+    planet.r = 2.5 + ev.velocity * 3;
+    const planets = this.bodies.filter((b) => !b.star);
+    if (planets.length > 260) this.bodies.splice(this.bodies.indexOf(planets[0]), 1);
+  }
+
   /** Where a body launched from the current drag would go (stars held fixed). */
   private predict(): number[] {
     if (!this.drag) return [];
@@ -184,6 +208,7 @@ class OrbitsSim implements SimulationModel {
   }
 
   render(g: CanvasRenderingContext2D): void {
+    this.pulse *= 0.9;
     // Trails fade from transparent (oldest) to solid (newest) in a few bands.
     const bands = 4;
     for (const b of this.bodies) {
@@ -204,13 +229,14 @@ class OrbitsSim implements SimulationModel {
 
     for (const b of this.bodies) {
       if (b.star) {
-        const glow = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r * 3);
+        const R = b.r * (3 + this.pulse * 3);
+        const glow = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, R);
         glow.addColorStop(0, "rgba(255,220,140,0.9)");
         glow.addColorStop(0.35, "rgba(255,170,60,0.35)");
         glow.addColorStop(1, "rgba(255,140,40,0)");
         g.fillStyle = glow;
         g.beginPath();
-        g.arc(b.x, b.y, b.r * 3, 0, Math.PI * 2);
+        g.arc(b.x, b.y, R, 0, Math.PI * 2);
         g.fill();
       }
       g.beginPath();
@@ -242,7 +268,7 @@ export const orbits: ModelDefinition = {
   name: "Orbits",
   category: "Particle physics",
   description: "Planets orbiting stars under Newtonian gravity, with trails. A dashed line previews where a launch will go.",
-  hint: "Drag to launch a planet (the drag sets its velocity). Right-drag or Shift-drag launches a new star.",
+  hint: "Drag to launch a planet (the drag sets its velocity). Right-drag or Shift-drag launches a new star. Each note adds a planet, low notes on outer orbits.",
   fixedDt: 1 / 60,
   params: [
     {
@@ -259,5 +285,10 @@ export const orbits: ModelDefinition = {
     { kind: "number", key: "trail", label: "Trail length", min: 0, max: TRAIL_MAX, step: 10, default: 200 },
     { kind: "boolean", key: "mutual", label: "Planets attract each other", default: false },
   ],
+  macros: [
+    { key: "warp", label: "Time warp", targets: [{ param: "timeScale", amount: 0.5 }] },
+    { key: "trails", label: "Long trails", targets: [{ param: "trail", amount: 0.7 }] },
+  ],
+  modulations: [{ source: "kick", target: "timeScale", amount: 0.12 }],
   create: () => new OrbitsSim(),
 };

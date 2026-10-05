@@ -1,4 +1,4 @@
-import type { ModelDefinition, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { Raster, palette } from "./lib/raster";
 
 const PALETTES: Record<string, Uint32Array> = {
@@ -128,6 +128,26 @@ class SlimeSim implements SimulationModel {
     this.trail = t;
   }
 
+  onNote(ev: NoteEvent): void {
+    const { w, h } = this;
+    if (ev.role === "tone") {
+      // Notes drop food in a band across the canvas; the mould grows toward it.
+      const cx = w * (0.08 + ev.x * 0.84), cy = h * (0.5 + Math.sin(ev.note * 1.7) * 0.35);
+      const r = 3 + ev.velocity * 18 / this.cell;
+      for (let y = Math.floor(cy - r); y <= cy + r; y++) {
+        for (let x = Math.floor(cx - r); x <= cx + r; x++) {
+          if (x < 0 || y < 0 || x >= w || y >= h || (x - cx) ** 2 + (y - cy) ** 2 > r * r) continue;
+          this.trail[y * w + x] = Math.max(this.trail[y * w + x], 80 * ev.velocity);
+        }
+      }
+    } else {
+      // Drum hits jolt the agents' headings, so the network shivers on the beat.
+      const jolt = ev.velocity * (ev.role === "kick" ? 1.2 : ev.role === "snare" ? 0.6 : 0.25);
+      const ah = this.ah;
+      for (let i = 0; i < ah.length; i++) ah[i] += (Math.random() - 0.5) * jolt;
+    }
+  }
+
   onPointer(input: PointerInput): void {
     this.brush = input.pressed && input.type !== "up"
       ? { x: input.x, y: input.y, erase: input.button === 2 || input.shift }
@@ -155,7 +175,7 @@ export const slime: ModelDefinition = {
   name: "Slime mould",
   category: "Algorithmic",
   description: "Physarum agents follow and lay pheromone trails, self-organising into glowing transport networks.",
-  hint: "Drag to drop food the mould will grow toward. Right-drag or Shift-drag to wipe its trails.",
+  hint: "Drag to drop food the mould will grow toward. Right-drag or Shift-drag to wipe its trails. Notes drop food placed by pitch; drums make the network shiver.",
   fixedDt: 1 / 60,
   params: [
     {
@@ -182,5 +202,10 @@ export const slime: ModelDefinition = {
     { kind: "number", key: "decay", label: "Trail decay", min: 0.1, max: 6, step: 0.1, default: 1.5 },
     { kind: "number", key: "cellSize", label: "Cell size", min: 1, max: 6, step: 1, default: 2, resetOnChange: true },
   ],
+  macros: [
+    { key: "wander", label: "Wander", targets: [{ param: "sensorAngle", amount: 0.4 }, { param: "turnSpeed", amount: 0.4 }] },
+    { key: "rush", label: "Rush", targets: [{ param: "speed", amount: 0.5 }, { param: "decay", amount: 0.2 }] },
+  ],
+  modulations: [{ source: "kick", target: "speed", amount: 0.25 }],
   create: () => new SlimeSim(),
 };
