@@ -3,6 +3,13 @@ import type { AudioBands } from "./modulation";
 
 export type Waveform = "triangle" | "sawtooth" | "square" | "sine";
 
+/** The sound of a chord style: oscillator shape, filter brightness and attack in seconds. */
+export interface ChordTone {
+  wave: Waveform;
+  cutoff: number;
+  attack: number;
+}
+
 const SILENT: AudioBands = { level: 0, bass: 0, mid: 0, treble: 0 };
 const SPECTRUM_BINS = 48;
 const WAVE_POINTS = 128;
@@ -108,6 +115,63 @@ export class AudioEngine {
       const { osc, gain } = this.voice(note, velocity, t);
       gain.gain.setTargetAtTime(0, t + length, 0.08);
       osc.stop(t + length + 0.6);
+    }
+  }
+
+  /** A bass note: a filtered saw over a sine sub, with a plucky filter envelope. */
+  bass(note: number, velocity: number, time: number, length: number): void {
+    const ctx = this.ensure();
+    const t = Math.max(time, ctx.currentTime);
+    const hz = midiToHz(note);
+    const saw = ctx.createOscillator();
+    saw.type = "sawtooth";
+    saw.frequency.value = hz;
+    const sub = ctx.createOscillator();
+    sub.frequency.value = hz;
+    const filter = ctx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.Q.value = 3;
+    filter.frequency.setValueAtTime(220 + velocity * 1300, t);
+    filter.frequency.exponentialRampToValueAtTime(160, t + 0.3);
+    const subGain = ctx.createGain();
+    subGain.gain.value = 0.9;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(velocity * 0.3, t + 0.008);
+    gain.gain.setTargetAtTime(velocity * 0.22, t + 0.01, 0.2);
+    gain.gain.setTargetAtTime(0, t + length, 0.04);
+    saw.connect(filter).connect(gain);
+    sub.connect(subGain).connect(gain);
+    gain.connect(this.master);
+    for (const o of [saw, sub]) {
+      o.start(t);
+      o.stop(t + length + 0.3);
+    }
+  }
+
+  /** A chord: one slightly detuned voice per note through a shared filter. */
+  chord(notes: number[], velocity: number, time: number, length: number, tone: ChordTone): void {
+    const ctx = this.ensure();
+    const t = Math.max(time, ctx.currentTime);
+    const filter = ctx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(tone.cutoff * (0.6 + 0.6 * velocity), t);
+    filter.frequency.exponentialRampToValueAtTime(tone.cutoff * 0.45, t + Math.max(0.15, length));
+    const gain = ctx.createGain();
+    const level = (velocity * 0.32) / Math.sqrt(Math.max(1, notes.length));
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(level, t + tone.attack);
+    gain.gain.setTargetAtTime(level * 0.7, t + tone.attack, 0.25);
+    gain.gain.setTargetAtTime(0, t + length, 0.06);
+    filter.connect(gain).connect(this.master);
+    for (const n of notes) {
+      const osc = ctx.createOscillator();
+      osc.type = tone.wave;
+      osc.frequency.value = midiToHz(n);
+      osc.detune.value = (Math.random() - 0.5) * 10;
+      osc.connect(filter);
+      osc.start(t);
+      osc.stop(t + length + 0.5);
     }
   }
 

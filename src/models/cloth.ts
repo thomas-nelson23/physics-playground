@@ -208,6 +208,21 @@ class ClothSim implements SimulationModel {
     } else if (ev.role === "hat") {
       // A shimmer: a light flutter down the hem.
       this.impulse((_x, y) => [(Math.random() - 0.5) * 1.2 * ev.velocity * (y / h), 0]);
+    } else if (ev.role === "bassline") {
+      // A slow swell rolls along the hem, its wavelength set by pitch.
+      const k = 0.006 + ev.x * 0.012, phase = Math.random() * Math.PI * 2;
+      this.impulse((x, y) => [0, -Math.sin(x * k + phase) * 2.2 * ev.velocity * punch * (y / h)]);
+    } else if (ev.role === "chord") {
+      // Each note of the chord dyes a soft vertical band, placed by pitch class.
+      for (const n of ev.notes ?? [ev.note]) {
+        const cx = w * (0.08 + ((((n % 12) + 12) % 12) / 11) * 0.84), hue = noteHue(n);
+        for (let k = 0; k < this.n; k++) {
+          const f = Math.exp(-((this.x[k] - cx) ** 2) / 2500) * 0.45 * ev.velocity;
+          if (f < 0.03) continue;
+          if (f > this.dye[k] * 0.5) this.dyeHue[k] = hue;
+          this.dye[k] = Math.min(1, this.dye[k] + f);
+        }
+      }
     } else if (ev.role === "tone") {
       // Notes pluck the cloth where they land, low notes left, high notes right, and dye it their colour.
       const cx = w * (0.12 + ev.x * 0.76), cy = h * (0.35 + Math.random() * 0.3), r = 90;
@@ -402,6 +417,8 @@ export const cloth: ModelDefinition = {
     { source: "snare", text: "Shakes every point at random" },
     { source: "hat", text: "A flutter along the hem, and the threads sparkle" },
     { source: "tone", text: "Plucks the silk where the note lands (low left, high right) and dyes it the note's colour" },
+    { source: "bassline", text: "A slow swell rolls along the hem" },
+    { source: "chord", text: "Each note of the chord dyes a soft vertical band of silk" },
     { source: "spectrum", text: "Each frequency lifts its column of silk (Spectrum lift)" },
     { source: "bass", text: "Lifts the whole curtain (Bass billow)" },
     { source: "level", text: "The silk glows brighter as the music gets louder" },

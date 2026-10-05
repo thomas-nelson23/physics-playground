@@ -1,12 +1,16 @@
 import type { NoteEvent, NoteRole } from "../models/types";
-import type { AudioEngine } from "./audio";
+import type { AudioEngine, ChordTone } from "./audio";
 
 /** Sixteenth notes per bar. */
 export const STEPS = 16;
-export const DRUMS: { role: NoteRole; label: string; note: number }[] = [
-  { role: "hat", label: "Hat", note: 42 },
-  { role: "snare", label: "Snare", note: 38 },
-  { role: "kick", label: "Kick", note: 36 },
+
+export type DrumKey = "kick" | "snare" | "hat";
+
+/** The drum tracks, inner ring first. `max` is how many hits full density gives. */
+export const DRUMS: { key: DrumKey; role: NoteRole; label: string; note: number; max: number; colour: string }[] = [
+  { key: "kick", role: "kick", label: "Kick", note: 36, max: 10, colour: "#f0883e" },
+  { key: "snare", role: "snare", label: "Snare", note: 38, max: 8, colour: "#ff7b72" },
+  { key: "hat", role: "hat", label: "Hat", note: 42, max: 16, colour: "#79c0ff" },
 ];
 
 export const SCALES: Record<string, { label: string; steps: number[] }> = {
@@ -21,88 +25,192 @@ export const SCALES: Record<string, { label: string; steps: number[] }> = {
 export const ROOTS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 /**
- * How likely each sixteenth is to get a hit, per drum (ordered like DRUMS).
- * 1 = always there, 0 = never. Density bends these curves: low density keeps
- * only the strongest steps, high density fills in the weak ones.
+ * The overall feel. Each style places the euclidean drum tracks (how many hits
+ * and where the pattern starts) and sets how hard and how often it fills.
+ * Picking a style moves the drum density sliders to its starting point.
  */
-export const STYLES: Record<string, { label: string; drums: number[][] }> = {
-  broken: {
-    label: "Broken beat",
-    drums: [
-      [0.95, 0.25, 0.7, 0.3, 0.95, 0.25, 0.7, 0.35, 0.95, 0.25, 0.7, 0.3, 0.95, 0.25, 0.7, 0.45],
-      [0, 0, 0, 0.08, 1, 0, 0.05, 0.2, 0, 0.1, 0, 0.15, 1, 0.08, 0.12, 0.3],
-      [1, 0, 0.15, 0.05, 0.3, 0, 0.2, 0.1, 0.75, 0.05, 0.4, 0.1, 0.2, 0.05, 0.25, 0.15],
-    ],
+export const STYLES: Record<string, { label: string; hits: Record<DrumKey, number>; rotate: Record<DrumKey, number>; level: number; fills: number }> = {
+  broken: { label: "Broken beat", hits: { kick: 3, snare: 2, hat: 11 }, rotate: { kick: 0, snare: 4, hat: 0 }, level: 1, fills: 1 },
+  four: { label: "Four on the floor", hits: { kick: 4, snare: 2, hat: 4 }, rotate: { kick: 0, snare: 4, hat: 2 }, level: 1, fills: 0.8 },
+  half: { label: "Half-time", hits: { kick: 3, snare: 1, hat: 8 }, rotate: { kick: 0, snare: 8, hat: 0 }, level: 1, fills: 1 },
+  ambient: { label: "Ambient", hits: { kick: 2, snare: 1, hat: 5 }, rotate: { kick: 0, snare: 12, hat: 2 }, level: 0.6, fills: 0.3 },
+};
+
+/** Velocity accent per sixteenth: downbeats loudest, then beats, then off-beats. */
+const ACCENT = [1, 0.55, 0.75, 0.55, 0.9, 0.55, 0.75, 0.6, 0.95, 0.55, 0.75, 0.55, 0.9, 0.55, 0.75, 0.65];
+
+export const BASS_STYLES: Record<string, { label: string; weights: number[]; legato: number; onChange: boolean }> = {
+  pulse: { label: "Root pulse", weights: [1, 0.1, 0.6, 0.1, 0.85, 0.1, 0.6, 0.15, 0.95, 0.1, 0.6, 0.1, 0.85, 0.15, 0.6, 0.3], legato: 0.8, onChange: true },
+  offbeat: { label: "Off-beat", weights: [0.15, 0, 1, 0.1, 0.15, 0, 1, 0.1, 0.15, 0, 1, 0.1, 0.15, 0, 1, 0.2], legato: 0.6, onChange: false },
+  octave: { label: "Octave bounce", weights: [1, 0.15, 0.8, 0.15, 0.9, 0.15, 0.8, 0.2, 0.95, 0.15, 0.8, 0.15, 0.9, 0.2, 0.8, 0.3], legato: 0.5, onChange: true },
+  syncopated: { label: "Syncopated", weights: [1, 0, 0.3, 0.75, 0, 0.25, 0.8, 0, 0.4, 0.65, 0, 0.75, 0, 0.3, 0.6, 0.4], legato: 0.7, onChange: true },
+  walk: { label: "Walking", weights: [1, 0, 0.1, 0, 1, 0, 0.1, 0, 1, 0, 0.1, 0, 1, 0, 0.15, 0.05], legato: 0.95, onChange: true },
+  drone: { label: "Drone", weights: [1, 0, 0, 0, 0.05, 0, 0, 0, 0.6, 0, 0, 0, 0.05, 0, 0, 0], legato: 1, onChange: true },
+};
+
+/**
+ * Chord progressions per style, as Roman numerals relative to the key, one
+ * list for major-sounding scales and one for minor. "b" flattens the root,
+ * lower case is minor, ° diminished, ø half-diminished; suffixes add 7ths,
+ * 9ths, sus and power chords.
+ */
+export const CHORD_STYLES: Record<string, {
+  label: string;
+  major: string[];
+  minor: string[];
+  /** Comping rhythm: how likely each sixteenth is to get a hit. */
+  rhythm: number[];
+  /** How much of the gap to the next hit a chord holds for. */
+  legato: number;
+  tone: ChordTone;
+}> = {
+  jazz: {
+    label: "Jazz",
+    major: ["ii7 V7 Imaj7 Imaj7", "Imaj7 vi7 ii7 V7", "iii7 vi7 ii7 V7", "Imaj9 vi9 ii9 V9", "Imaj7 I7 IVmaj7 iv7 iii7 VI7 ii7 V7"],
+    minor: ["iiø7 V7 i7 i7", "i7 iv7 bVII7 bIIImaj7", "i7 bVImaj7 iiø7 V7", "i9 iv9 i9 V7"],
+    rhythm: [0.9, 0, 0, 0.2, 0, 0, 0.85, 0.1, 0, 0.3, 0.5, 0, 0, 0.2, 0.6, 0.15],
+    legato: 0.6,
+    tone: { wave: "triangle", cutoff: 2600, attack: 0.006 },
   },
-  four: {
-    label: "Four on the floor",
-    drums: [
-      [0.2, 0.3, 0.95, 0.3, 0.2, 0.3, 0.95, 0.35, 0.2, 0.3, 0.95, 0.3, 0.2, 0.3, 0.95, 0.4],
-      [0, 0, 0, 0.03, 1, 0, 0, 0.1, 0, 0, 0, 0.08, 1, 0.03, 0.1, 0.2],
-      [1, 0, 0, 0.05, 1, 0, 0, 0.1, 1, 0, 0.05, 0.05, 1, 0, 0.1, 0.15],
-    ],
+  pop: {
+    label: "Pop",
+    major: ["I V vi IV", "vi IV I V", "I vi IV V", "I IV vi V", "IV I V vi"],
+    minor: ["i bVI bIII bVII", "i bVII bVI bVII", "i iv bVI bVII", "bVI bVII i i", "i bIII bVII iv"],
+    rhythm: [1, 0, 0.3, 0, 0.5, 0, 0.6, 0, 0.8, 0, 0.3, 0.2, 0.5, 0, 0.6, 0.1],
+    legato: 0.95,
+    tone: { wave: "sawtooth", cutoff: 1500, attack: 0.02 },
   },
-  half: {
-    label: "Half-time",
-    drums: [
-      [0.9, 0.4, 0.6, 0.4, 0.9, 0.4, 0.6, 0.45, 0.9, 0.4, 0.6, 0.4, 0.9, 0.4, 0.6, 0.5],
-      [0, 0, 0, 0, 0, 0, 0, 0.1, 1, 0, 0, 0.1, 0, 0.15, 0, 0.2],
-      [1, 0, 0.1, 0, 0.1, 0, 0.3, 0.1, 0.2, 0, 0.5, 0.1, 0.1, 0, 0.2, 0.1],
-    ],
+  dance: {
+    label: "Dance",
+    major: ["vi IV I V", "Iadd9 V vi IV", "IV V vi vi", "Imaj7 IVmaj7 Imaj7 IVmaj7", "vi7 IVmaj7 I V"],
+    minor: ["i bVI bIII bVII", "i bVII bVI bVII", "i i bVI bVII", "i7 bVImaj7 bIII bVII", "iadd9 bVImaj7 bVII iv7"],
+    rhythm: [0.15, 0, 1, 0, 0.15, 0, 1, 0, 0.15, 0, 1, 0, 0.15, 0.1, 1, 0.2],
+    legato: 0.45,
+    tone: { wave: "square", cutoff: 2200, attack: 0.004 },
   },
-  ambient: {
-    label: "Ambient",
-    drums: [
-      [0.5, 0, 0.2, 0, 0.4, 0, 0.2, 0.05, 0.5, 0, 0.2, 0, 0.4, 0, 0.2, 0.1],
-      [0, 0, 0, 0, 0.3, 0, 0, 0, 0, 0, 0, 0.05, 0.6, 0, 0, 0.05],
-      [0.9, 0, 0, 0, 0, 0, 0.1, 0, 0.4, 0, 0.05, 0, 0, 0, 0.1, 0],
-    ],
+  epic: {
+    label: "Epic",
+    major: ["I bVI bVII I", "I III vi IV", "vi IV I V", "I bIII IV I", "Isus4 I bVI bVII"],
+    minor: ["i bVI bIII bVII", "i bVI iv V", "i bVII bVI V", "i bIII bVII IV", "i5 bVI5 bVII5 i5", "isus2 bVI bIII V"],
+    rhythm: [1, 0.1, 0.7, 0.1, 0.8, 0.1, 0.7, 0.1, 0.9, 0.1, 0.7, 0.1, 0.8, 0.15, 0.75, 0.3],
+    legato: 0.9,
+    tone: { wave: "sawtooth", cutoff: 1900, attack: 0.012 },
   },
+};
+
+/** How long each chord lasts, in sixteenths, for each notch of the Change speed slider. */
+const CHORD_LENGTHS = [64, 32, 16, 8, 4];
+export const CHORD_SPEED_LABELS = ["4 bars", "2 bars", "1 bar", "½ bar", "1 beat"];
+
+export const MELODY_STYLES: Record<string, { label: string }> = {
+  wander: { label: "Wander" },
+  arp: { label: "Arpeggio" },
+  motif: { label: "Motif" },
+  lyrical: { label: "Lyrical" },
 };
 
 /** Metric weight of each sixteenth for melody notes: downbeats first, then off-beats. */
 const MELODY_WEIGHT = [1, 0.15, 0.45, 0.2, 0.8, 0.15, 0.5, 0.25, 0.9, 0.15, 0.45, 0.2, 0.75, 0.2, 0.55, 0.3];
+/** What Groove leans the melody's rhythm towards: the "and"s and "a"s, syncopated. */
+const GROOVE_WEIGHT = [0.6, 0.2, 0.35, 0.85, 0.2, 0.4, 0.9, 0.3, 0.55, 0.25, 0.35, 0.85, 0.2, 0.45, 0.9, 0.6];
 /** Extra snare and hat weight in the last beat of a fill bar. */
 const FILL_WEIGHT = [0.55, 0.7, 0.8, 0.95];
+/** How fast the melody drifts from bar to bar. */
+const MELODY_DRIFT = 0.3;
 
 export interface SequencerState {
+  // Global
   tempo: number;
   swing: number;
   scale: string;
   root: number;
   sound: boolean;
   style: string;
-  /** 0..1: how many of the possible drum hits play. */
-  drumDensity: number;
-  /** 0..1: how many of the possible melody notes play. */
-  melodyDensity: number;
-  /** 0..1: how fast the pattern evolves from bar to bar, and how often it fills. */
-  variation: number;
-  /** Melody span in scale degrees. */
-  range: number;
-  /** Freeze the current pattern instead of letting it evolve. */
+  /** Freeze every part instead of letting it evolve. */
   hold: boolean;
   seed: number;
+  // Parts on or off
+  drumsOn: boolean;
+  bassOn: boolean;
+  chordsOn: boolean;
+  melodyOn: boolean;
+  // Drums: density picks how many euclidean hits, variation how much each bar strays.
+  kickDensity: number;
+  kickVariation: number;
+  kickRotate: number;
+  snareDensity: number;
+  snareVariation: number;
+  snareRotate: number;
+  hatDensity: number;
+  hatVariation: number;
+  hatRotate: number;
+  // Bass
+  bassStyle: string;
+  bassDensity: number;
+  /** 1..7: how many intervals the bass may use, root first. */
+  bassRange: number;
+  bassVariation: number;
+  // Chords
+  chordStyle: string;
+  /** Index into CHORD_LENGTHS. */
+  chordSpeed: number;
+  /** How often the progression is swapped or a chord substituted. */
+  chordVariation: number;
+  chordDensity: number;
+  /** How much the comping rhythm changes from bar to bar. */
+  chordRhythm: number;
+  /** Which progression of the style is playing. */
+  prog: number;
+  // Melody
+  melodyStyle: string;
+  melodyDensity: number;
+  /** Span in scale degrees. */
+  melodyRange: number;
+  /** 0..1: straight to syncopated, repeating and clipped. */
+  melodyGroove: number;
 }
 
 export function defaultState(): SequencerState {
-  return {
-    tempo: 112, swing: 0, scale: "minorPent", root: 0, sound: true,
-    style: "broken", drumDensity: 0.5, melodyDensity: 0.45, variation: 0.35, range: 8, hold: false,
-    seed: 1,
+  const s: SequencerState = {
+    tempo: 112, swing: 0, scale: "minorPent", root: 9, sound: true, style: "broken", hold: false, seed: 1,
+    drumsOn: true, bassOn: true, chordsOn: true, melodyOn: true,
+    kickDensity: 0, kickVariation: 0.3, kickRotate: 0,
+    snareDensity: 0, snareVariation: 0.25, snareRotate: 0,
+    hatDensity: 0, hatVariation: 0.4, hatRotate: 0,
+    bassStyle: "pulse", bassDensity: 0.4, bassRange: 3, bassVariation: 0.3,
+    chordStyle: "pop", chordSpeed: 2, chordVariation: 0.3, chordDensity: 0.3, chordRhythm: 0.25, prog: 0,
+    melodyStyle: "wander", melodyDensity: 0.4, melodyRange: 8, melodyGroove: 0.3,
   };
+  applyStyleDensities(s);
+  return s;
 }
 
-/** Keep only fields that match the current state's types (older saves had a step grid). */
+/** Set the drum sliders to the style's starting pattern. */
+export function applyStyleDensities(s: SequencerState): void {
+  const st = STYLES[s.style] ?? STYLES.broken;
+  for (const d of DRUMS) {
+    (s as unknown as Record<string, number>)[`${d.key}Density`] = st.hits[d.key] / d.max;
+    (s as unknown as Record<string, number>)[`${d.key}Rotate`] = 0;
+  }
+}
+
+/** Keep only fields that match the current state's types (older saves had other controls). */
 export function sanitizeState(saved: unknown): SequencerState {
   const s = defaultState();
   if (!saved || typeof saved !== "object") return s;
   const rec = s as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(saved as Record<string, unknown>)) {
-    if (k in rec && typeof v === typeof rec[k]) rec[k] = v;
+    if (k in rec && typeof v === typeof rec[k] && (typeof v !== "number" || Number.isFinite(v))) rec[k] = v;
   }
   if (!(s.style in STYLES)) s.style = "broken";
   if (!(s.scale in SCALES)) s.scale = "minorPent";
+  if (!(s.bassStyle in BASS_STYLES)) s.bassStyle = "pulse";
+  if (!(s.chordStyle in CHORD_STYLES)) s.chordStyle = "pop";
+  if (!(s.melodyStyle in MELODY_STYLES)) s.melodyStyle = "wander";
+  s.root = ((Math.round(s.root) % 12) + 12) % 12;
+  s.chordSpeed = Math.max(0, Math.min(CHORD_LENGTHS.length - 1, Math.round(s.chordSpeed)));
+  s.bassRange = Math.max(1, Math.min(7, Math.round(s.bassRange)));
+  s.melodyRange = Math.max(2, Math.min(16, Math.round(s.melodyRange)));
   return s;
 }
 
@@ -118,6 +226,8 @@ function mulberry32(seed: number): () => number {
   };
 }
 
+const mod = (n: number, m: number) => ((n % m) + m) % m;
+
 /**
  * Chance that a step with weight `w` plays at `density`. 0.5 plays each step
  * with its own weight; lower values thin out to the strongest steps and higher
@@ -129,20 +239,93 @@ export function chance(w: number, density: number): number {
   return Math.pow(w, Math.pow(2, (0.5 - density) * 6));
 }
 
-/** One bar as the generator would play it right now, for the pattern view. */
-export interface BarView {
-  drums: { on: boolean; velocity: number }[][];
-  /** Melody degree per step, or null for a rest. */
-  melody: (number | null)[];
-  fill: boolean;
+/** `k` hits spread as evenly as possible over `n` steps, starting at `rotate`. */
+export function euclid(k: number, n: number, rotate: number): boolean[] {
+  const out = new Array<boolean>(n).fill(false);
+  k = Math.min(n, Math.max(0, Math.round(k)));
+  for (let j = 0; j < k; j++) out[mod(Math.floor((j * n) / k) + rotate, n)] = true;
+  return out;
+}
+
+/** A chord as semitones: `root` above the key, `tones` above the root. */
+export interface Chord {
+  numeral: string;
+  root: number;
+  tones: number[];
+}
+
+const NUMERALS = ["I", "II", "III", "IV", "V", "VI", "VII"];
+const MAJOR_SEMIS = [0, 2, 4, 5, 7, 9, 11];
+
+/** Parse a Roman-numeral chord like "bVImaj7", "iiø7" or "Isus4". */
+export function parseChord(sym: string): Chord {
+  const m = /^([b#]?)(VII|VI|IV|V|III|II|I|vii|vi|iv|v|iii|ii|i)([°ø+]?)(.*)$/.exec(sym);
+  if (!m) return { numeral: sym, root: 0, tones: [0, 4, 7] };
+  const [, acc, num, q, suffix] = m;
+  const upper = num === num.toUpperCase();
+  const root = mod(MAJOR_SEMIS[NUMERALS.indexOf(num.toUpperCase())] + (acc === "b" ? -1 : acc === "#" ? 1 : 0), 12);
+  let third = upper ? 4 : 3, fifth = 7;
+  if (q === "°" || q === "ø") { third = 3; fifth = 6; }
+  if (q === "+") fifth = 8;
+  const seventh = q === "°" ? 9 : 10;
+  let tones = [0, third, fifth];
+  switch (suffix) {
+    case "7": tones.push(seventh); break;
+    case "maj7": tones.push(11); break;
+    case "9": tones.push(seventh, 14); break;
+    case "maj9": tones.push(11, 14); break;
+    case "add9": tones.push(14); break;
+    case "6": tones.push(9); break;
+    case "sus2": tones = [0, 2, fifth]; break;
+    case "sus4": tones = [0, 5, fifth]; break;
+    case "7sus4": tones = [0, 5, fifth, 10]; break;
+    case "5": tones = [0, 7, 12]; break;
+  }
+  if (q === "ø" && !tones.includes(10)) tones.push(10);
+  return { numeral: sym, root, tones };
+}
+
+/** A readable chord name in a key, e.g. "Am7", "F#sus4", "Bbmaj9". */
+export function chordName(c: Chord, key: number): string {
+  const name = ROOTS[mod(key + c.root, 12)];
+  const has = (n: number) => c.tones.some((t) => mod(t, 12) === n && !(n === 2 && t === 14));
+  const nine = c.tones.includes(14);
+  const q = has(4) && has(8) ? "+" : has(3) && has(6) ? (has(10) ? "ø" : "°") : has(3) ? "m" : has(4) ? "" : has(2) ? "sus2" : has(5) ? "sus4" : "5";
+  let ext = "";
+  if (q === "ø") ext = "7";
+  else if (has(11)) ext = nine ? "maj9" : "maj7";
+  else if (has(10)) ext = nine ? "9" : "7";
+  else if (has(9)) ext = q === "°" ? "7" : "6";
+  else if (nine) ext = "add9";
+  return q.startsWith("sus") ? name + ext + q : name + q + ext;
+}
+
+/** One bar of drums as the generator would play it, for the ring view. */
+export interface DrumStep {
+  on: boolean;
+  velocity: number;
+  /** "base" is the euclidean pattern; "ghost" an extra from Variation; "fill" from a fill. */
+  kind: "base" | "ghost" | "fill" | "off";
+}
+
+/** One melody note in the bar view. */
+export interface MelodyNote {
+  step: number;
+  /** 0..1, low to high within the melody's range. */
+  x: number;
+  length: number;
+  velocity: number;
 }
 
 /**
- * A generative sequencer. Instead of a grid of switched-on steps it keeps a
- * random "gate" per step and a wandering melody line, and plays every step
- * whose gate is under the chance its style and density give it. Each bar it
- * re-rolls a share of the gates and nudges a few melody notes (Variation), and
- * now and then plays a fill.
+ * A generative sequencer in four parts. Drums are euclidean rings whose
+ * density sets the number of hits and whose variation adds ghost notes, drops
+ * and nudges each bar. Chords walk through a progression typical of their
+ * style, and Variation swaps progressions and substitutes chords. The bass
+ * follows the chord root, and the melody follows the scale and leans on chord
+ * tones. Each part keeps a fixed random "gate" per step and plays every step
+ * whose gate is under the chance its weights and density give it, so raising
+ * a density only adds notes.
  *
  * Scheduling uses the usual Web Audio lookahead pattern: a timer schedules
  * sounds a little ahead on the audio clock, and the matching visual events
@@ -156,18 +339,35 @@ export class Sequencer {
   current = -1;
   /** Bumped whenever the pattern changes, so views know to redraw. */
   version = 0;
+  /** The progression this pass is playing, after Variation's substitutions. */
+  cycle: Chord[] = [];
+  /** Which chord of `cycle` is sounding. */
+  chordIndex = 0;
+  /** Epic's key change, in semitones, for this pass of the progression. */
+  lift = 0;
   private rng: () => number;
-  private drumGate: number[][] = [];
+  private drumVar: { shift: number; ghost: Map<number, number>; drop: Set<number> }[] = [];
+  private bassGate: number[] = [];
+  private bassPick: number[] = [];
+  private chordGate: number[] = [];
+  private voicing: number[] = [];
   private melodyGate: number[] = [];
   private degree: number[] = [];
+  private motif: number[] = [];
+  private motifShift: number[] = [];
+  private lyric: number[] = [];
+  private arpMode = 0;
   private bar = 0;
   private fillBar = false;
   private fillRequested = false;
-  private nextStep = 0;
+  /** Absolute sixteenth being scheduled next, counted from Play. */
+  private abs = 0;
   private nextTime = 0;
   private startTime = 0;
   private timer: number | undefined;
-  private queue: { time: number; step: number; events: NoteEvent[] }[] = [];
+  private queue: { time: number; step: number; chord: number; events: NoteEvent[] }[] = [];
+  /** Which chord the scheduler has reached (it runs a little ahead of what's heard). */
+  private schedChord = -1;
 
   constructor(private audio: AudioEngine, state?: SequencerState) {
     this.state = state ?? defaultState();
@@ -179,17 +379,28 @@ export class Sequencer {
     return 60 / this.state.tempo / 4;
   }
 
-  /** Start over from a fresh seed. */
+  /** The key's root, including Epic's lift. */
+  get key(): number {
+    return this.state.root + this.lift;
+  }
+
+  get chord(): Chord {
+    return this.cycle[this.chordIndex] ?? this.cycle[0] ?? parseChord("I");
+  }
+
+  /** Start over from a fresh seed: new drums variations, gates, melody and progression. */
   newIdea(): void {
     this.state.seed = Math.floor(Math.random() * 2 ** 31);
     this.rng = mulberry32(this.state.seed);
+    this.state.prog = Math.floor(this.rng() * 8);
     this.generate();
   }
 
   /** Play a fill at the end of the current bar. */
   fill(): void {
+    const step = this.abs % STEPS;
     // Too late in this bar for a fill to be heard: play it at the end of the next one.
-    if (this.playing && this.nextStep > 0 && this.nextStep <= 12) this.fillBar = true;
+    if (this.playing && step > 0 && step <= 12) this.fillBar = true;
     else this.fillRequested = true;
     this.version++;
   }
@@ -198,56 +409,311 @@ export class Sequencer {
     return this.fillRequested || this.fillBar;
   }
 
-  private generate(): void {
-    const r = this.rng;
-    this.drumGate = DRUMS.map(() => Array.from({ length: STEPS }, r));
-    this.melodyGate = Array.from({ length: STEPS }, r);
-    // A melody that wanders by small steps and leans on the root on strong beats.
-    const half = Math.floor(this.state.range / 2);
-    let pos = 0;
-    this.degree = [];
-    for (let i = 0; i < STEPS; i++) {
-      if (MELODY_WEIGHT[i] >= 0.75 && r() < 0.5) pos = this.chordTone(pos);
-      else pos += [-2, -1, -1, 0, 1, 1, 2][Math.floor(r() * 7)];
-      pos = Math.max(-half, Math.min(half, pos));
-      this.degree.push(pos);
-    }
+  /** Rebuild the progression after the chord style or scale changed. */
+  refreshHarmony(): void {
+    this.buildCycle(false);
+    this.chordIndex = Math.min(this.chordIndex, this.cycle.length - 1);
+    this.schedChord = Math.min(this.schedChord, this.cycle.length - 1);
     this.version++;
   }
 
-  /** The nearest root or fifth to a degree. */
-  private chordTone(d: number): number {
-    const len = this.scaleSteps().length;
-    const fifth = this.scaleSteps().findIndex((s) => s === 7);
-    const tones: number[] = [];
-    for (let o = -3; o <= 3; o++) {
-      tones.push(o * len);
-      if (fifth > 0) tones.push(o * len + fifth);
+  private generate(): void {
+    const r = this.rng;
+    this.drumVar = DRUMS.map(() => ({ shift: 0, ghost: new Map(), drop: new Set() }));
+    this.bassGate = Array.from({ length: STEPS }, r);
+    this.bassPick = Array.from({ length: STEPS }, r);
+    this.chordGate = Array.from({ length: STEPS }, r);
+    this.melodyGate = Array.from({ length: STEPS }, r);
+    // A melody that wanders by small steps.
+    let pos = 0;
+    this.degree = [];
+    for (let i = 0; i < STEPS; i++) {
+      pos += [-2, -1, -1, 0, 1, 1, 2][Math.floor(r() * 7)];
+      pos = Math.max(-6, Math.min(6, pos));
+      this.degree.push(pos);
     }
-    return tones.reduce((best, t) => (Math.abs(t - d) < Math.abs(best - d) ? t : best), 0);
+    // A one-beat cell, repeated and moved each beat.
+    this.motif = [0];
+    for (let i = 1; i < 4; i++) this.motif.push(this.motif[i - 1] + [-2, -1, 1, 2, 0][Math.floor(r() * 5)]);
+    this.motifShift = [0, ...Array.from({ length: 3 }, () => [-2, -1, 1, 2, 3][Math.floor(r() * 5)])];
+    // A slow line that moves once a beat.
+    this.lyric = [];
+    let l = 0;
+    for (let b = 0; b < 4; b++) {
+      l = Math.max(-4, Math.min(4, l + [-2, -1, 1, 2][Math.floor(r() * 4)]));
+      for (let i = 0; i < 4; i++) this.lyric.push(l);
+    }
+    this.arpMode = Math.floor(r() * 3);
+    this.lift = 0;
+    this.buildCycle(true);
+    this.chordIndex = 0;
+    this.voicing = [];
+    this.version++;
   }
 
-  /** Each bar, re-roll some gates and nudge some notes. */
+  private progressions(): string[] {
+    const style = CHORD_STYLES[this.state.chordStyle] ?? CHORD_STYLES.pop;
+    const steps = SCALES[this.state.scale]?.steps ?? [];
+    return steps.includes(3) ? style.minor : style.major;
+  }
+
+  /** Set up the next pass of the progression. Variation may switch progression and substitute chords. */
+  private buildCycle(first: boolean): void {
+    const r = this.rng;
+    const v = this.state.hold || first ? 0 : this.state.chordVariation;
+    const list = this.progressions();
+    if (r() < v * 0.5) this.state.prog = (this.state.prog + 1 + Math.floor(r() * (list.length - 1))) % list.length;
+    const syms = list[mod(this.state.prog, list.length)].split(" ");
+    this.cycle = syms.map((s) => {
+      const c = parseChord(s);
+      return r() < v * 0.45 ? this.substitute(c) : c;
+    });
+    // Epic's wildcard: some passes lift the whole song up a step or two, then it comes home.
+    if (this.state.chordStyle === "epic" && !first && !this.state.hold) {
+      this.lift = this.lift === 0 && r() < v * 0.6 ? (r() < 0.5 ? 2 : 1) : 0;
+    } else if (this.state.chordStyle !== "epic") {
+      this.lift = 0;
+    }
+  }
+
+  /** A style-typical replacement for a chord. */
+  private substitute(c: Chord): Chord {
+    const r = this.rng;
+    const minor = c.tones.includes(3) && !c.tones.includes(4);
+    const major = c.tones.includes(4) && !c.tones.includes(3);
+    switch (this.state.chordStyle) {
+      case "jazz":
+        // Tritone substitution for a dominant; otherwise a ninth on top.
+        if (major && c.tones.includes(10)) return { numeral: `sub${c.numeral}`, root: mod(c.root + 6, 12), tones: c.tones };
+        return { ...c, tones: c.tones.includes(14) ? c.tones : [...c.tones, 14] };
+      case "pop":
+        if (r() < 0.5) return { ...c, tones: c.tones.map((t) => (t === 3 || t === 4 ? (r() < 0.5 ? 2 : 5) : t)) };
+        if (major) return { numeral: c.numeral, root: mod(c.root + 9, 12), tones: [0, 3, 7] };
+        if (minor) return { numeral: c.numeral, root: mod(c.root + 3, 12), tones: [0, 4, 7] };
+        return c;
+      case "dance":
+        return { ...c, tones: [...c.tones, r() < 0.5 ? 14 : minor ? 10 : 11] };
+      case "epic":
+        // A chromatic mediant or a bare power chord.
+        if (r() < 0.5) return { numeral: c.numeral, root: mod(c.root + (r() < 0.5 ? 4 : 8), 12), tones: [0, 4, 7] };
+        return { ...c, tones: [0, 7, 12] };
+    }
+    return c;
+  }
+
+  /** Each bar, let every part stray from its pattern by its own Variation. */
   private evolve(): void {
     this.bar++;
     this.fillBar = this.fillRequested;
     this.fillRequested = false;
-    const v = this.state.variation;
-    if (!this.fillBar && v > 0.15 && this.bar % 4 === 3 && this.rng() < v) this.fillBar = true;
-    if (this.state.hold || v <= 0) {
+    const s = this.state;
+    const style = STYLES[s.style] ?? STYLES.broken;
+    const drumV = Math.max(s.kickVariation, s.snareVariation, s.hatVariation);
+    if (!this.fillBar && drumV > 0.15 && this.bar % 4 === 3 && this.rng() < drumV * style.fills) this.fillBar = true;
+    if (s.hold) {
       this.version++;
       return;
     }
     const r = this.rng;
-    const half = Math.floor(this.state.range / 2);
-    for (const gates of this.drumGate) {
-      for (let i = 0; i < STEPS; i++) if (r() < v * 0.2) gates[i] = r();
-    }
+    DRUMS.forEach((d, i) => {
+      const v = this.drumVariation(d.key);
+      const dv = { shift: 0, ghost: new Map<number, number>(), drop: new Set<number>() };
+      const base = euclid(this.pulses(d.key), STEPS, this.rotation(d.key));
+      if (r() < v * 0.9) {
+        // Ghost notes in the gaps; hats get more of them.
+        const n = 1 + Math.floor(r() * (1 + v * (d.key === "hat" ? 4 : 2)));
+        for (let k = 0; k < n; k++) {
+          const step = Math.floor(r() * STEPS);
+          if (!base[step]) dv.ghost.set(step, 0.25 + 0.3 * r());
+        }
+      }
+      if (r() < v * 0.5) {
+        // Leave a hit out, but never the kick on the one.
+        const hits = base.map((on, k) => (on ? k : -1)).filter((k) => k >= 0 && !(d.key === "kick" && k === 0));
+        if (hits.length > 1) dv.drop.add(hits[Math.floor(r() * hits.length)]);
+      }
+      if (v > 0.5 && r() < (v - 0.5) * 0.6) dv.shift = r() < 0.5 ? -1 : 1;
+      this.drumVar[i] = dv;
+    });
+    const bv = s.bassVariation;
     for (let i = 0; i < STEPS; i++) {
-      if (r() < v * 0.25) this.melodyGate[i] = r();
-      if (r() < v * 0.2) this.degree[i] = Math.max(-half, Math.min(half, this.degree[i] + (r() < 0.5 ? -1 : 1) * (r() < 0.3 ? 2 : 1)));
+      if (r() < bv * 0.3) this.bassGate[i] = r();
+      if (r() < bv * 0.35) this.bassPick[i] = r();
+      if (r() < s.chordRhythm * 0.3) this.chordGate[i] = r();
+      if (r() < MELODY_DRIFT * 0.25) this.melodyGate[i] = r();
+      if (r() < MELODY_DRIFT * 0.2) this.degree[i] = Math.max(-8, Math.min(8, this.degree[i] + (r() < 0.5 ? -1 : 1) * (r() < 0.3 ? 2 : 1)));
+    }
+    if (r() < MELODY_DRIFT * 0.5) this.motif[1 + Math.floor(r() * 3)] += r() < 0.5 ? -1 : 1;
+    if (r() < MELODY_DRIFT * 0.4) this.motifShift[1 + Math.floor(r() * 3)] = [-2, -1, 1, 2, 3][Math.floor(r() * 5)];
+    if (r() < MELODY_DRIFT * 0.4) {
+      const b = Math.floor(r() * 4);
+      const l = Math.max(-5, Math.min(5, this.lyric[b * 4] + (r() < 0.5 ? -1 : 1)));
+      for (let i = 0; i < 4; i++) this.lyric[b * 4 + i] = l;
     }
     this.version++;
+  }
+
+  // ---- Drums ----------------------------------------------------------------
+
+  private num(key: string): number {
+    return (this.state as unknown as Record<string, number>)[key];
+  }
+
+  /** How many euclidean hits a drum track has at its density. */
+  pulses(key: DrumKey): number {
+    const d = this.num(`${key}Density`);
+    const max = DRUMS.find((x) => x.key === key)!.max;
+    return d <= 0 ? 0 : Math.max(1, Math.round(d * max));
+  }
+
+  /** Where the track's pattern starts: the style's placement plus the user's turn of the ring. */
+  rotation(key: DrumKey): number {
+    const style = STYLES[this.state.style] ?? STYLES.broken;
+    return style.rotate[key] + Math.round(this.num(`${key}Rotate`));
+  }
+
+  private drumVariation(key: DrumKey): number {
+    return this.num(`${key}Variation`);
+  }
+
+  /** The bare euclidean pattern of a track, without this bar's variations. */
+  basePattern(i: number): boolean[] {
+    const d = DRUMS[i];
+    return euclid(this.pulses(d.key), STEPS, this.rotation(d.key));
+  }
+
+  drumHit(i: number, step: number, fill = this.fillBar): DrumStep {
+    const d = DRUMS[i];
+    const style = STYLES[this.state.style] ?? STYLES.broken;
+    const dv = this.drumVar[i];
+    const base = euclid(this.pulses(d.key), STEPS, this.rotation(d.key) + dv.shift);
+    const level = style.level;
+    if (fill && step >= 12 && d.key !== "kick" && this.pulses(d.key) > 0) {
+      // Rolls build through the last beat.
+      const w = FILL_WEIGHT[step - 12] * (d.key === "snare" ? 1 : 0.8);
+      if (base[step] || w > 0.6) return { on: true, velocity: Math.min(1, (0.55 + 0.1 * (step - 12) + 0.2 * w) * level), kind: base[step] ? "base" : "fill" };
+    }
+    if (base[step] && !dv.drop.has(step)) return { on: true, velocity: (0.45 + 0.5 * ACCENT[step]) * level, kind: "base" };
+    const ghost = dv.ghost.get(step);
+    if (ghost !== undefined && this.pulses(d.key) > 0) return { on: true, velocity: ghost * level, kind: "ghost" };
+    return { on: false, velocity: 0, kind: "off" };
+  }
+
+  // ---- Harmony --------------------------------------------------------------
+
+  /** Sixteenths per chord. */
+  get chordLength(): number {
+    return CHORD_LENGTHS[Math.max(0, Math.min(CHORD_LENGTHS.length - 1, Math.round(this.state.chordSpeed)))];
+  }
+
+  private advanceChord(): void {
+    this.schedChord++;
+    if (this.schedChord >= this.cycle.length) {
+      this.buildCycle(false);
+      this.schedChord = 0;
+    }
+    this.voicing = this.voice(this.cycle[this.schedChord]);
+    this.version++;
+  }
+
+  /** Pitch classes of the chord being scheduled. */
+  private chordPcs(c: Chord): Set<number> {
+    return new Set(c.tones.map((t) => mod(this.key + c.root + t, 12)));
+  }
+
+  /** Voice a chord near the last one, so the changes move smoothly. */
+  private voice(c: Chord): number[] {
+    const pc = mod(this.key + c.root, 12);
+    const tones = [...new Set(c.tones)].sort((a, b) => a - b);
+    const prev = this.voicing.length ? this.voicing : [57, 60, 64, 67];
+    let best: number[] = tones.map((t) => 48 + pc + t);
+    let bestCost = Infinity;
+    for (let inv = 0; inv < tones.length; inv++) {
+      for (const oct of [36, 48, 60]) {
+        const notes = tones.map((t, i) => oct + pc + t + (i < inv ? 12 : 0)).sort((a, b) => a - b);
+        if (notes[0] < 50 || notes[notes.length - 1] > 80) continue;
+        const mean = notes.reduce((a, b) => a + b, 0) / notes.length;
+        let cost = Math.abs(mean - 63) * 0.4;
+        notes.forEach((n, i) => (cost += Math.abs(n - prev[Math.min(i, prev.length - 1)]) / notes.length));
+        if (cost < bestCost) { bestCost = cost; best = notes; }
+      }
+    }
+    this.voicing = best;
+    return best;
+  }
+
+  private chordOn(a: number): boolean {
+    const s = this.state;
+    if (!s.chordsOn || s.chordDensity <= 0) return false;
+    if (a % this.chordLength === 0) return true;
+    const style = CHORD_STYLES[s.chordStyle] ?? CHORD_STYLES.pop;
+    const step = a % STEPS;
+    return this.chordGate[step] < chance(style.rhythm[step], s.chordDensity);
+  }
+
+  // ---- Bass -------------------------------------------------------------------
+
+  private bassOn(a: number): boolean {
+    const s = this.state;
+    if (!s.bassOn || s.bassDensity <= 0) return false;
+    const style = BASS_STYLES[s.bassStyle] ?? BASS_STYLES.pulse;
+    if (style.onChange && a % this.chordLength === 0) return true;
+    const step = a % STEPS;
+    return this.bassGate[step] < chance(style.weights[step], s.bassDensity);
+  }
+
+  private bassNote(a: number, c: Chord, next: Chord): number {
+    const s = this.state;
+    const step = a % STEPS;
+    const pick = this.bassPick[step];
+    const third = c.tones.find((t) => t === 3 || t === 4 || t === 2 || t === 5) ?? 7;
+    const seventh = c.tones.find((t) => t === 10 || t === 11 || t === 9) ?? 10;
+    const pool = [0, 12, 7, third, -5, seventh, 2].slice(0, Math.max(1, Math.round(s.bassRange)));
+    const any = () => pool[Math.floor(pick * pool.length)];
+    let interval = 0;
+    switch (s.bassStyle) {
+      case "octave":
+        interval = step % 4 < 2 ? 0 : pool.length > 1 ? 12 : 0;
+        if (pool.length > 2 && pick > 0.8) interval = 7;
+        break;
+      case "walk": {
+        if (a % this.chordLength === 0) break;
+        const toNext = (a + 4) % this.chordLength < 4;
+        if (toNext && pool.length >= 3) {
+          // Approach the next chord's root from a semitone away.
+          let target = mod(next.root - c.root, 12);
+          if (target > 6) target -= 12;
+          interval = target + (pick < 0.5 ? -1 : 1);
+        } else interval = any();
+        break;
+      }
+      case "drone":
+        interval = step === 8 && pool.length > 1 ? pool[1 + Math.floor(pick * (pool.length - 1))] : 0;
+        break;
+      default:
+        interval = step % 8 === 0 && pick < 0.7 ? 0 : any();
+    }
+    let base = 36 + mod(this.key + c.root, 12);
+    if (base > 43) base -= 12;
+    return base + interval;
+  }
+
+  // ---- Melody -----------------------------------------------------------------
+
+  private melodyWeight(step: number): number {
+    const s = this.state;
+    if (s.melodyStyle === "lyrical") return MELODY_WEIGHT[step] ** 2;
+    const g = s.melodyGroove;
+    return MELODY_WEIGHT[step] * (1 - g) + GROOVE_WEIGHT[step] * g;
+  }
+
+  private melodyOn(step: number, fill: boolean): boolean {
+    const s = this.state;
+    if (!s.melodyOn) return false;
+    const density = fill && step >= 12 ? Math.min(1, s.melodyDensity + 0.2) : s.melodyDensity;
+    // With groove, the second half-bar answers the first with the same rhythm.
+    const gate = s.melodyGroove > 0.45 && step >= 8 ? this.melodyGate[step - 8] : this.melodyGate[step];
+    return gate < chance(this.melodyWeight(step), density);
   }
 
   private scaleSteps(): number[] {
@@ -259,51 +725,90 @@ export class Sequencer {
     const steps = this.scaleSteps();
     const octave = Math.floor(d / steps.length);
     const idx = d - octave * steps.length;
-    const root = this.state.root > 6 ? this.state.root - 12 : this.state.root;
+    const key = mod(this.key, 12);
+    const root = key > 6 ? key - 12 : key;
     return 60 + root + octave * 12 + steps[idx];
   }
 
-  /** Degree clamped to the current range (the range slider can shrink below a stored note). */
-  private clampDegree(d: number): number {
-    const half = Math.floor(this.state.range / 2);
-    return Math.max(-half, Math.min(half, d));
-  }
-
-  private drumHit(i: number, step: number, fill: boolean): { on: boolean; velocity: number } {
-    const style = STYLES[this.state.style] ?? STYLES.broken;
-    let w = style.drums[i][step];
-    let density = this.state.drumDensity;
-    if (fill && step >= 12 && DRUMS[i].role !== "kick") {
-      w = Math.max(w, FILL_WEIGHT[step - 12]);
-      density = Math.max(density, 0.6);
+  /** The nearest scale degree that's in the chord, if one is close. */
+  private snap(d: number, pcs: Set<number>, half: number): number {
+    for (const off of [0, 1, -1, 2, -2, 3, -3]) {
+      const t = d + off;
+      if (Math.abs(t) <= half && pcs.has(mod(this.degreeNote(t), 12))) return t;
     }
-    const p = chance(w, density);
-    const on = this.drumGate[i][step] < p;
-    const velocity = Math.min(1, 0.4 + 0.55 * w + (fill && step >= 12 ? (step - 12) * 0.05 : 0));
-    return { on, velocity };
+    return d;
   }
 
-  private melodyOn(step: number, fill: boolean): boolean {
-    const density = fill && step >= 12 ? Math.min(1, this.state.melodyDensity + 0.2) : this.state.melodyDensity;
-    return this.melodyGate[step] < chance(MELODY_WEIGHT[step], density);
+  /** Scale degree of the chord's root nearest the melody's centre, for moving the motif with the harmony. */
+  private chordDegree(c: Chord): number {
+    const pc = mod(this.key + c.root, 12);
+    const len = this.scaleSteps().length;
+    for (let d = 0; d < len; d++) {
+      if (mod(this.degreeNote(d), 12) === pc) return d > len / 2 ? d - len : d;
+    }
+    return 0;
   }
 
-  /** The bar that's playing (or would play next), for drawing. */
-  view(): BarView {
-    const fill = this.fillBar;
-    return {
-      drums: DRUMS.map((_, i) => Array.from({ length: STEPS }, (_, s) => this.drumHit(i, s, fill))),
-      melody: Array.from({ length: STEPS }, (_, s) => (this.melodyOn(s, fill) ? this.clampDegree(this.degree[s]) : null)),
-      fill,
-    };
+  /** The note the melody plays at a step over a chord, and where it sits in the range. */
+  private melodyNote(step: number, c: Chord): { note: number; x: number } {
+    const s = this.state;
+    const half = Math.max(1, Math.floor(s.melodyRange / 2));
+    const pcs = this.chordPcs(c);
+    if (s.melodyStyle === "arp") {
+      const ladder: number[] = [];
+      for (let d = -half; d <= half; d++) {
+        const n = this.degreeNote(d);
+        if (pcs.has(mod(n, 12)) && !ladder.includes(n)) ladder.push(n);
+      }
+      if (ladder.length === 0) for (let d = -half; d <= half; d++) ladder.push(this.degreeNote(d));
+      const L = ladder.length;
+      let idx: number;
+      if (this.arpMode === 0) idx = step % L;
+      else if (this.arpMode === 1) idx = L - 1 - (step % L);
+      else {
+        const period = Math.max(1, 2 * L - 2);
+        const p = step % period;
+        idx = p < L ? p : period - p;
+      }
+      return { note: ladder[idx], x: L > 1 ? idx / (L - 1) : 0.5 };
+    }
+    let d: number;
+    if (s.melodyStyle === "motif") d = this.motif[step % 4] + this.motifShift[Math.floor(step / 4)] + this.chordDegree(c);
+    else if (s.melodyStyle === "lyrical") d = this.lyric[step];
+    else d = this.degree[step];
+    d = Math.max(-half, Math.min(half, d));
+    if (s.melodyStyle === "lyrical" || MELODY_WEIGHT[step] >= 0.75) d = this.snap(d, pcs, half);
+    return { note: this.degreeNote(d), x: (d + half) / (2 * half) };
   }
+
+  /** The melody of the bar that's playing, for the view. */
+  melodyBar(): MelodyNote[] {
+    const out: MelodyNote[] = [];
+    const c = this.chord;
+    for (let i = 0; i < STEPS; i++) {
+      if (!this.melodyOn(i, this.fillBar)) continue;
+      const { x } = this.melodyNote(i, c);
+      out.push({ step: i, x, length: this.melodyGap(i), velocity: 0.5 + 0.4 * this.melodyWeight(i) });
+    }
+    return out;
+  }
+
+  private melodyGap(step: number): number {
+    const cap = this.state.melodyStyle === "lyrical" ? 8 : 4;
+    let gap = 1;
+    while (gap < cap && step + gap < STEPS && !this.melodyOn(step + gap, this.fillBar)) gap++;
+    return gap;
+  }
+
+  // ---- Transport ----------------------------------------------------------------
 
   start(): void {
     if (this.playing) return;
     const ctx = this.audio.ensure();
     this.playing = true;
-    this.nextStep = 0;
+    this.abs = 0;
     this.bar = 0;
+    this.schedChord = -1;
     this.nextTime = ctx.currentTime + 0.06;
     this.startTime = this.nextTime;
     this.schedule();
@@ -314,6 +819,7 @@ export class Sequencer {
     this.playing = false;
     this.current = -1;
     this.queue = [];
+    this.chordIndex = 0;
     window.clearInterval(this.timer);
   }
 
@@ -326,32 +832,66 @@ export class Sequencer {
   private schedule(): void {
     const ctx = this.audio.ctx;
     if (!ctx || !this.playing) return;
+    const s = this.state;
     while (this.nextTime < ctx.currentTime + 0.12) {
-      const step = this.nextStep;
-      if (step === 0 && this.nextTime > this.startTime) this.evolve();
+      const a = this.abs;
+      const step = a % STEPS;
+      if (step === 0 && a > 0) this.evolve();
+      if (a % this.chordLength === 0 || this.schedChord < 0) this.advanceChord();
+      const c = this.cycle[this.schedChord];
+      const next = this.cycle[(this.schedChord + 1) % this.cycle.length];
+      const len = this.stepLength;
       // Swing delays every second sixteenth.
-      const t = this.nextTime + (step % 2 === 1 ? this.state.swing * this.stepLength * 0.5 : 0);
+      const t = this.nextTime + (step % 2 === 1 ? s.swing * len * 0.5 : 0);
       const events: NoteEvent[] = [];
-      DRUMS.forEach((d, i) => {
-        const hit = this.drumHit(i, step, this.fillBar);
-        if (!hit.on) return;
-        events.push({ note: d.note, velocity: hit.velocity, role: d.role, x: 0.5, source: "sequencer" });
-        if (this.state.sound) this.audio.hit(d.role, d.note, hit.velocity, t);
-      });
-      if (this.melodyOn(step, this.fillBar)) {
-        const half = Math.max(1, Math.floor(this.state.range / 2));
-        const deg = this.clampDegree(this.degree[step]);
-        const note = this.degreeNote(deg);
-        const velocity = 0.55 + 0.4 * MELODY_WEIGHT[step];
-        // Hold the note until the next one (up to a beat) so sparse melodies sing.
-        let gap = 1;
-        while (gap < 4 && step + gap < STEPS && !this.melodyOn(step + gap, this.fillBar)) gap++;
-        events.push({ note, velocity, role: "tone", x: (deg + half) / (2 * half), source: "sequencer" });
-        if (this.state.sound) this.audio.hit("tone", note, velocity, t, this.stepLength * gap * 0.95);
+
+      if (s.drumsOn) {
+        DRUMS.forEach((d, i) => {
+          const hit = this.drumHit(i, step);
+          if (!hit.on) return;
+          events.push({ note: d.note, velocity: hit.velocity, role: d.role, x: 0.5, source: "sequencer" });
+          if (s.sound) this.audio.hit(d.role, d.note, hit.velocity, t);
+        });
       }
-      this.queue.push({ time: t, step, events });
-      this.nextTime += this.stepLength;
-      this.nextStep = (step + 1) % STEPS;
+
+      if (this.bassOn(a)) {
+        const style = BASS_STYLES[s.bassStyle] ?? BASS_STYLES.pulse;
+        const note = this.bassNote(a, c, next);
+        let gap = 1;
+        while (gap < 16 && !this.bassOn(a + gap) && (a + gap) % this.chordLength !== 0) gap++;
+        const velocity = 0.55 + 0.4 * (style.weights[step] || 0.5);
+        events.push({ note, velocity, role: "bassline", x: Math.min(1, Math.max(0, (note - 24) / 31)), source: "sequencer" });
+        if (s.sound) this.audio.bass(note, velocity, t, len * Math.max(0.5, gap * style.legato) * 0.95);
+      }
+
+      if (this.chordOn(a)) {
+        const style = CHORD_STYLES[s.chordStyle] ?? CHORD_STYLES.pop;
+        let gap = 1;
+        while (gap < 64 && !this.chordOn(a + gap)) gap++;
+        const change = a % this.chordLength === 0;
+        const velocity = change ? 0.85 : 0.45 + 0.4 * style.rhythm[step];
+        let notes = this.voicing;
+        // Epic doubles the chord an octave below and above.
+        if (s.chordStyle === "epic") notes = [notes[0] - 12, ...notes, notes[notes.length - 1] + 12];
+        const mean = notes.reduce((x, y) => x + y, 0) / notes.length;
+        events.push({ note: 48 + mod(this.key + c.root, 12), notes, velocity, role: "chord", x: Math.min(1, Math.max(0, (mean - 50) / 26)), source: "sequencer" });
+        if (s.sound) this.audio.chord(notes, velocity, t, len * Math.max(0.6, gap * style.legato), style.tone);
+      }
+
+      if (this.melodyOn(step, this.fillBar)) {
+        const { note, x } = this.melodyNote(step, c);
+        const w = this.melodyWeight(step);
+        const velocity = Math.min(1, 0.5 + 0.4 * w + (s.melodyGroove > 0.3 && GROOVE_WEIGHT[step] > 0.8 ? 0.1 : 0));
+        // Hold the note until the next one; Groove clips it shorter.
+        const gap = this.melodyGap(step);
+        const hold = Math.max(0.35, gap * (1 - 0.55 * s.melodyGroove));
+        events.push({ note, velocity, role: "tone", x, source: "sequencer" });
+        if (s.sound) this.audio.hit("tone", note, velocity, t, len * hold * 0.95);
+      }
+
+      this.queue.push({ time: t, step, chord: this.schedChord, events });
+      this.nextTime += len;
+      this.abs++;
     }
   }
 
@@ -363,6 +903,10 @@ export class Sequencer {
     while (this.queue.length && this.queue[0].time <= ctx.currentTime) {
       const q = this.queue.shift()!;
       this.current = q.step;
+      if (q.chord !== this.chordIndex) {
+        this.chordIndex = q.chord;
+        this.version++;
+      }
       out.push(...q.events);
     }
     return out;
