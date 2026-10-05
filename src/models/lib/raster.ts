@@ -23,11 +23,11 @@ export class Raster {
   }
 
   /** Blit the buffer to `g`, stretched to `w` x `h` CSS pixels. */
-  draw(g: CanvasRenderingContext2D, w: number, h: number, smooth = false): void {
+  draw(g: CanvasRenderingContext2D, w: number, h: number, smooth = false, x = 0, y = 0): void {
     this.ctx.putImageData(this.image, 0, 0);
     const prev = g.imageSmoothingEnabled;
     g.imageSmoothingEnabled = smooth;
-    g.drawImage(this.canvas, 0, 0, w, h);
+    g.drawImage(this.canvas, x, y, w, h);
     g.imageSmoothingEnabled = prev;
   }
 }

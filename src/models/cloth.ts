@@ -1,12 +1,17 @@
-import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, MusicFrame, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { gravityAt, gravityModeParam, isUniform, uniformDir } from "./lib/gravity";
+import { noteHue } from "./lib/music";
+import { Feedback, applyFeedback, colourParam, feedbackParams, schemeHue } from "./lib/visual";
 
-const BUCKETS = 6;
+/** Silk is drawn in this many hues times this many shades, one path each, to keep fills cheap. */
+const HUES = 18;
+const SHADES = 8;
 
 /**
- * A cloth of point masses joined by distance constraints, integrated with
- * Verlet and relaxed by repeated constraint projection (position-based
- * dynamics). Over-stretched links snap, so the cloth can be torn.
+ * A silk curtain that dances to the music: the spectrum lifts its columns
+ * like an equaliser (bass on the left, treble on the right), kicks blow
+ * gusts through it, and notes pluck it and dye it their colour. Underneath
+ * it is a Verlet cloth with distance constraints; torn links heal back.
  */
 class ClothSim implements SimulationModel {
   private n = 0;
@@ -26,14 +31,27 @@ class ClothSim implements SimulationModel {
   private time = 0;
   private torn = 0;
   private gustSide = 1;
+  private cols = 0;
+  private rows = 0;
+  /** Link index of the horizontal / vertical link starting at each point, or -1. */
+  private hLink = new Int32Array(0);
+  private vLink = new Int32Array(0);
+  /** Note colour soaked into each point, fading out. */
+  private dyeHue = new Float32Array(0);
+  private dye = new Float32Array(0);
+  private healClock = 0;
+  private fb = new Feedback();
+  private stepped = false;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
     const cols = p.resolution as number;
-    const clothW = view.width * 0.62;
+    const clothW = view.width * 0.8;
     const spacing = clothW / (cols - 1);
-    const rows = Math.max(4, Math.floor((view.height * 0.6) / spacing));
-    const left = (view.width - clothW) / 2, top = view.height * 0.08;
+    const rows = Math.max(4, Math.floor((view.height * 0.72) / spacing));
+    const left = (view.width - clothW) / 2, top = view.height * 0.06;
+    this.cols = cols;
+    this.rows = rows;
     this.n = cols * rows;
     this.x = new Float64Array(this.n);
     this.y = new Float64Array(this.n);
@@ -54,13 +72,17 @@ class ClothSim implements SimulationModel {
     this.px = this.x.slice();
     this.py = this.y.slice();
     const a: number[] = [], b: number[] = [];
+    this.hLink = new Int32Array(this.n).fill(-1);
+    this.vLink = new Int32Array(this.n).fill(-1);
     for (let j = 0; j < rows; j++) {
       for (let i = 0; i < cols; i++) {
         const k = j * cols + i;
-        if (i < cols - 1) { a.push(k); b.push(k + 1); }
-        if (j < rows - 1) { a.push(k); b.push(k + cols); }
+        if (i < cols - 1) { this.hLink[k] = a.length; a.push(k); b.push(k + 1); }
+        if (j < rows - 1) { this.vLink[k] = a.length; a.push(k); b.push(k + cols); }
       }
     }
+    this.dyeHue = new Float32Array(this.n);
+    this.dye = new Float32Array(this.n);
     this.ca = Int32Array.from(a);
     this.cb = Int32Array.from(b);
     this.alive = new Uint8Array(a.length).fill(1);
@@ -73,10 +95,19 @@ class ClothSim implements SimulationModel {
     this.view = view;
   }
 
-  step(dt: number, p: ParamValues): void {
+  step(dt: number, p: ParamValues, m: MusicFrame): void {
     const { x, y, px, py, pinned, n } = this;
+    this.stepped = true;
     this.time += dt;
     const gravity = p.gravity as number;
+    // The spectrum lifts each column from below, most at the hem: bass on the left, treble on the right.
+    // Both are shares of gravity, so the silk rises toward weightless but only flies off at the extremes.
+    const lift = (p.spectrumLift as number) * 0.45 * gravity;
+    const billow = (p.billow as number) * Math.min(1.5, m.bass) * 0.25 * gravity;
+    const spec = m.spectrum;
+    const cols = this.cols, rows = this.rows;
+    const fade = Math.exp(-dt * 0.8);
+    for (let k = 0; k < n; k++) this.dye[k] *= fade;
     const mode = p.gravityMode as string;
     const uniform = isUniform(mode);
     const [ux, uy] = uniformDir(mode, this.time);
@@ -93,8 +124,13 @@ class ClothSim implements SimulationModel {
       py[k] = y[k];
       let gx = ux * gravity, gy = uy * gravity;
       if (!uniform) [gx, gy] = gravityAt(mode, gravity, x[k], y[k], w, h, this.time);
-      x[k] += vx + (gust + gx) * dt2;
-      y[k] += vy + gy * dt2;
+      const col = k % cols, row = (k / cols) | 0;
+      const depth = row / (rows - 1);
+      const up = (spec[Math.min(spec.length - 1, Math.floor((col / cols) * spec.length))] * lift + billow) * depth;
+      // The lift pushes against gravity (straight up for the point modes).
+      const lx = uniform ? -ux : 0, ly = uniform ? -uy : -1;
+      x[k] += vx + (gust + gx + lx * up) * dt2;
+      y[k] += vy + (gy + ly * up) * dt2;
     }
 
     const iters = p.stiffness as number;
@@ -128,6 +164,25 @@ class ClothSim implements SimulationModel {
     }
 
     if (this.cutter) this.cut(this.cutter.x, this.cutter.y, 14);
+    this.heal(dt, p.heal as number);
+  }
+
+  /** Torn links knit back together, a few at a time, once their ends are close enough again. */
+  private heal(dt: number, rate: number): void {
+    if (rate <= 0 || this.torn === 0) return;
+    this.healClock += dt * rate * 40;
+    const { x, y, ca, cb, alive, rest } = this;
+    let budget = Math.floor(this.healClock);
+    this.healClock -= budget;
+    for (let tries = 0; budget > 0 && tries < 400; tries++) {
+      const c = Math.floor(Math.random() * ca.length);
+      if (alive[c]) continue;
+      const d = Math.hypot(x[cb[c]] - x[ca[c]], y[cb[c]] - y[ca[c]]);
+      if (d > rest * 1.6) continue;
+      alive[c] = 1;
+      this.torn--;
+      budget--;
+    }
   }
 
   /** Give every free point a velocity kick (Verlet velocity is x - px). */
@@ -140,21 +195,33 @@ class ClothSim implements SimulationModel {
     }
   }
 
-  onNote(ev: NoteEvent): void {
+  onNote(ev: NoteEvent, p: ParamValues): void {
     const { width: w, height: h } = this.view;
+    const punch = p.punch as number;
     if (ev.role === "kick") {
       // A gust that alternates direction on each kick.
       this.gustSide = -this.gustSide;
-      const s = 9 * ev.velocity * this.gustSide;
-      this.impulse((_x, y) => [s * (0.6 + 0.4 * Math.sin(y * 0.03)), -2 * ev.velocity]);
+      const s = 4 * ev.velocity * this.gustSide * punch;
+      this.impulse((_x, y) => [s * (0.6 + 0.4 * Math.sin(y * 0.03)), -ev.velocity * punch]);
     } else if (ev.role === "snare") {
-      this.impulse(() => [(Math.random() - 0.5) * 4 * ev.velocity, (Math.random() - 0.5) * 4 * ev.velocity]);
+      this.impulse(() => [(Math.random() - 0.5) * 2.5 * ev.velocity * punch, (Math.random() - 0.5) * 2.5 * ev.velocity * punch]);
+    } else if (ev.role === "hat") {
+      // A shimmer: a light flutter down the hem.
+      this.impulse((_x, y) => [(Math.random() - 0.5) * 1.2 * ev.velocity * (y / h), 0]);
     } else if (ev.role === "tone") {
-      // Notes pluck the cloth where they land: low notes left, high notes right.
-      const cx = w * (0.2 + ev.x * 0.6), cy = h * 0.4, r = 70;
+      // Notes pluck the cloth where they land, low notes left, high notes right, and dye it their colour.
+      const cx = w * (0.12 + ev.x * 0.76), cy = h * (0.35 + Math.random() * 0.3), r = 90;
+      const hue = noteHue(ev.note);
+      for (let k = 0; k < this.n; k++) {
+        const d2 = (this.x[k] - cx) ** 2 + (this.y[k] - cy) ** 2;
+        const f = Math.exp(-d2 / (r * r * 1.5));
+        if (f < 0.05) continue;
+        if (f * ev.velocity > this.dye[k] * 0.5) this.dyeHue[k] = hue;
+        this.dye[k] = Math.min(1, this.dye[k] + f * ev.velocity);
+      }
       this.impulse((x, y) => {
         const d2 = (x - cx) ** 2 + (y - cy) ** 2;
-        const f = Math.exp(-d2 / (r * r)) * 10 * ev.velocity;
+        const f = Math.exp(-d2 / (r * r)) * 5 * ev.velocity * punch;
         return [0, -f];
       });
     }
@@ -192,27 +259,61 @@ class ClothSim implements SimulationModel {
     }
   }
 
-  render(g: CanvasRenderingContext2D): void {
-    const { x, y, ca, cb, alive, rest } = this;
-    // Colour each link by how stretched it is: blue when relaxed, red near tearing.
-    const paths = Array.from({ length: BUCKETS }, () => new Path2D());
-    for (let c = 0; c < ca.length; c++) {
-      if (!alive[c]) continue;
-      const a = ca[c], b = cb[c];
-      const strain = Math.hypot(x[b] - x[a], y[b] - y[a]) / rest - 1;
-      const bucket = Math.max(0, Math.min(BUCKETS - 1, Math.floor(strain * 12 * BUCKETS / 4)));
-      paths[bucket].moveTo(x[a], y[a]);
-      paths[bucket].lineTo(x[b], y[b]);
+  render(g: CanvasRenderingContext2D, view: Viewport, p: ParamValues, m: MusicFrame): void {
+    applyFeedback(this.fb, g, view, p, this.stepped);
+    this.stepped = false;
+    const { x, y, alive, rest, cols, rows, hLink, vLink, dye, dyeHue } = this;
+    const scheme = p.colours as string;
+    const restArea = rest * rest;
+    const glow = 0.5 + Math.min(1, m.level) * 0.3 + m.kick * 0.15;
+    // Each quad is shaded by how bunched up it is (folds go dark, stretched silk catches the light).
+    const paths: Path2D[] = Array.from({ length: HUES * SHADES }, () => new Path2D());
+    const hues = new Float32Array(HUES * SHADES);
+    const used = new Uint8Array(HUES * SHADES);
+    for (let j = 0; j < rows - 1; j++) {
+      for (let i = 0; i < cols - 1; i++) {
+        const k = j * cols + i;
+        const top = hLink[k], left = vLink[k], right = vLink[k + 1], bottom = hLink[k + cols];
+        if (!alive[top] || !alive[left] || !alive[right] || !alive[bottom]) continue;
+        const a = k, b = k + 1, c = k + cols + 1, d = k + cols;
+        const area = Math.abs((x[c] - x[a]) * (y[d] - y[b]) - (y[c] - y[a]) * (x[d] - x[b])) / 2;
+        const shade = Math.min(1, (area / restArea) * 0.8 + dye[k] * 0.6);
+        let hue = schemeHue(scheme, i / (cols - 1), m.hue, m.beats);
+        if (dye[k] > 0.15) hue = dyeHue[k];
+        const hb = Math.floor((((hue % 360) + 360) % 360) / (360 / HUES)) % HUES;
+        const sb = Math.min(SHADES - 1, Math.floor(shade * SHADES));
+        const bucket = hb * SHADES + sb;
+        hues[bucket] = hb * (360 / HUES);
+        used[bucket] = 1;
+        const path = paths[bucket];
+        path.moveTo(x[a], y[a]);
+        path.lineTo(x[b], y[b]);
+        path.lineTo(x[c], y[c]);
+        path.lineTo(x[d], y[d]);
+        path.closePath();
+      }
     }
-    g.lineWidth = 1.2;
-    for (let i = 0; i < BUCKETS; i++) {
-      const t = i / (BUCKETS - 1);
-      g.strokeStyle = `hsl(${205 - t * 205} ${70 + t * 20}% ${62 - t * 8}%)`;
-      g.stroke(paths[i]);
+    for (let i = 0; i < paths.length; i++) {
+      if (!used[i]) continue;
+      const shade = (i % SHADES) / (SHADES - 1);
+      g.fillStyle = `hsla(${hues[i]} 80% ${12 + shade * 50 * glow + shade * 10}% / ${0.55 + shade * 0.4})`;
+      g.fill(paths[i]);
     }
-    g.lineWidth = 1;
-    g.fillStyle = "#fff";
-    for (let k = 0; k < this.n; k++) if (this.pinned[k]) g.fillRect(x[k] - 2, y[k] - 2, 4, 4);
+    if (p.threads) {
+      g.globalCompositeOperation = "lighter";
+      const lines = new Path2D();
+      const { ca, cb } = this;
+      for (let c = 0; c < ca.length; c++) {
+        if (!alive[c]) continue;
+        lines.moveTo(x[ca[c]], y[ca[c]]);
+        lines.lineTo(x[cb[c]], y[cb[c]]);
+      }
+      g.lineWidth = 0.6;
+      g.strokeStyle = `rgba(255,255,255,${0.06 + m.hat * 0.15 + m.treble * 0.1})`;
+      g.stroke(lines);
+      g.lineWidth = 1;
+      g.globalCompositeOperation = "source-over";
+    }
     if (this.cutter) {
       g.beginPath();
       g.arc(this.cutter.x, this.cutter.y, 14, 0, Math.PI * 2);
@@ -228,33 +329,50 @@ class ClothSim implements SimulationModel {
 
 export const cloth: ModelDefinition = {
   id: "cloth",
-  name: "Cloth",
-  category: "Mechanics",
-  description: "A sheet of fabric simulated with Verlet integration and distance constraints. Links glow red as they stretch and snap past the tear limit.",
-  hint: "Drag to grab and pull the cloth. Right-drag or Shift-drag to slice it. Kicks blow gusts, snares shake it, notes pluck it left to right by pitch.",
+  name: "Silk curtain",
+  category: "Surfaces",
+  description: "A silk curtain that dances to the music. The spectrum lifts it like an equaliser, bass on the left and treble on the right; kicks blow gusts through it and every note plucks it and dyes it its colour.",
+  hint: "Drag to grab and pull the silk. Right-drag or Shift-drag to slice it; it slowly knits back together.",
   fixedDt: 1 / 60,
+  paintsBackground: true,
   params: [
+    { kind: "number", key: "spectrumLift", label: "Spectrum lift", min: 0, max: 4, step: 0.05, default: 1.2, group: "Music",
+      description: "How high loud frequencies lift their part of the curtain. High values fling the hem into the air." },
+    { kind: "number", key: "billow", label: "Bass billow", min: 0, max: 4, step: 0.05, default: 0.8, group: "Music",
+      description: "How much the bass lifts the whole curtain at once." },
+    { kind: "number", key: "punch", label: "Hit punch", min: 0, max: 4, step: 0.05, default: 1, group: "Music",
+      description: "How hard kicks, snares and notes shove the silk." },
     gravityModeParam("down"),
     {
-      kind: "number", key: "gravity", label: "Gravity strength", min: 0, max: 5000, step: 10, default: 800, group: "Gravity",
-      description: "How hard gravity pulls the cloth. Very high values stretch it red and rip it.",
+      kind: "number", key: "gravity", label: "Gravity strength", min: 0, max: 5000, step: 10, default: 700, group: "Gravity",
+      description: "How heavy the silk hangs. Low floats like chiffon; very high stretches and rips it.",
     },
     {
-      kind: "number", key: "wind", label: "Wind", min: -4000, max: 4000, step: 10, default: 80, group: "Forces",
+      kind: "number", key: "wind", label: "Wind", min: -4000, max: 4000, step: 10, default: 60, group: "Forces",
       description: "A gusty sideways breeze. Negative blows left, positive blows right.",
     },
     {
-      kind: "number", key: "stiffness", label: "Stiffness", min: 1, max: 40, step: 1, default: 8, group: "Behaviour",
+      kind: "number", key: "stiffness", label: "Stiffness", min: 1, max: 40, step: 1, default: 6, group: "Behaviour",
       description: "How firmly the fabric holds its shape. Low is stretchy like rubber; high is stiff like canvas.",
     },
     {
-      kind: "number", key: "tearLimit", label: "Tear limit", min: 1.2, max: 12, step: 0.1, default: 3.5, group: "Behaviour",
+      kind: "number", key: "tearLimit", label: "Tear limit", min: 1.2, max: 12, step: 0.1, default: 4, group: "Behaviour",
       description: "How far a link can stretch (times its rest length) before it snaps.",
     },
     {
       kind: "boolean", key: "tearable", label: "Tearable", default: true, group: "Behaviour",
       description: "Lets over-stretched links snap. Off: the cloth stretches without ever breaking.",
     },
+    {
+      kind: "number", key: "heal", label: "Healing", min: 0, max: 5, step: 0.05, default: 1, group: "Behaviour",
+      description: "How fast torn silk knits back together. Zero keeps every tear.",
+    },
+    colourParam("notes"),
+    {
+      kind: "boolean", key: "threads", label: "Show threads", default: true, group: "Look",
+      description: "Draws the weave as fine glowing lines over the silk; they sparkle with the hi-hats.",
+    },
+    ...feedbackParams(0.45, 0, 0),
     {
       kind: "choice", key: "pins", label: "Hang from", default: "curtain", resetOnChange: true, group: "Setup",
       description: "Where the cloth is pinned along its top. Changing it restarts the scene.",
@@ -265,25 +383,29 @@ export const cloth: ModelDefinition = {
       ],
     },
     {
-      kind: "number", key: "resolution", label: "Resolution", min: 10, max: 90, step: 1, default: 50, resetOnChange: true, group: "Setup",
+      kind: "number", key: "resolution", label: "Resolution", min: 10, max: 90, step: 1, default: 48, resetOnChange: true, group: "Setup",
       description: "How many points across the cloth. Higher is smoother but heavier to run.",
     },
   ],
   macros: [
-    { key: "storm", label: "Storm", targets: [{ param: "wind", amount: 0.4 }, { param: "stiffness", amount: -0.1 }] },
-    { key: "float", label: "Weightless", targets: [{ param: "gravity", amount: -0.2 }, { param: "stiffness", amount: -0.1 }] },
+    { key: "storm", label: "Storm", targets: [{ param: "wind", amount: 0.4 }, { param: "punch", amount: 0.3 }, { param: "stiffness", amount: -0.1 }] },
+    { key: "float", label: "Weightless", targets: [{ param: "gravity", amount: -0.12 }, { param: "spectrumLift", amount: 0.2 }, { param: "afterglow", amount: 0.3 }] },
     { key: "shred", label: "Heavy & brittle", targets: [{ param: "gravity", amount: 0.5 }, { param: "tearLimit", amount: -0.3 }] },
   ],
   modulations: [
-    { source: "kick", target: "gravity", amount: 0.2 },
-    { source: "snare", target: "stiffness", amount: -0.3 },
-    { source: "lfoBar", target: "wind", amount: 0.12 },
-    { source: "bass", target: "wind", amount: 0.15 },
+    { source: "lfoBar", target: "wind", amount: 0.08 },
+    { source: "snare", target: "stiffness", amount: -0.2 },
+    { source: "treble", target: "afterglow", amount: 0.2 },
   ],
   reactions: [
-    { role: "kick", text: "A gust that switches side on each kick" },
-    { role: "snare", text: "Shakes every point at random" },
-    { role: "tone", text: "Plucks the cloth upward, left to right by pitch" },
+    { source: "kick", text: "A gust that switches side on each kick" },
+    { source: "snare", text: "Shakes every point at random" },
+    { source: "hat", text: "A flutter along the hem, and the threads sparkle" },
+    { source: "tone", text: "Plucks the silk where the note lands (low left, high right) and dyes it the note's colour" },
+    { source: "spectrum", text: "Each frequency lifts its column of silk (Spectrum lift)" },
+    { source: "bass", text: "Lifts the whole curtain (Bass billow)" },
+    { source: "level", text: "The silk glows brighter as the music gets louder" },
+    { source: "treble", text: "The threads sparkle" },
   ],
   create: () => new ClothSim(),
 };

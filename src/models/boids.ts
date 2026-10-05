@@ -1,17 +1,26 @@
-import type { ModelDefinition, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, MusicFrame, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { noteHash, noteHue } from "./lib/music";
+import { Feedback, applyFeedback, colourParam, feedbackParams, schemeHue } from "./lib/visual";
 
 interface Boid {
   x: number;
   y: number;
   vx: number;
   vy: number;
+  /** Colour as a unit vector round the hue wheel, so neighbours can average it. */
+  hx: number;
+  hy: number;
+  spark: number;
 }
 
+const HUE_BUCKETS = 24;
+
 /**
- * Reynolds' boids: each agent steers by three local rules (separation,
- * alignment, cohesion). Neighbour search uses a uniform grid so a few
- * thousand boids stay interactive.
+ * A murmuration of light streaks. Underneath it is Reynolds' boids
+ * (separation, alignment, cohesion, on a grid for speed), but every note
+ * lures the flock and soaks the nearest birds in its colour, and colour
+ * spreads bird to bird through the flock like a rumour. Kicks scatter it,
+ * snares spin a vortex through it, and the bass stretches the streaks.
  */
 class BoidsSim implements SimulationModel {
   private boids: Boid[] = [];
@@ -19,16 +28,18 @@ class BoidsSim implements SimulationModel {
   private pointer: { x: number; y: number; repel: boolean } | null = null;
   /** Short-lived pulls toward where recent notes landed. */
   private lures: { x: number; y: number; life: number; strength: number }[] = [];
-  private hue = 160;
-  private targetHue = 160;
   private flash = 0;
   private scatter = 160;
+  private vortex: { x: number; y: number; life: number; dir: number } | null = null;
+  private fb = new Feedback();
+  private stepped = false;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
     this.boids = Array.from({ length: p.count as number }, () => {
       const a = Math.random() * Math.PI * 2;
-      return { x: Math.random() * view.width, y: Math.random() * view.height, vx: Math.cos(a) * 60, vy: Math.sin(a) * 60 };
+      const h = ((200 + Math.random() * 60) * Math.PI) / 180;
+      return { x: Math.random() * view.width, y: Math.random() * view.height, vx: Math.cos(a) * 60, vy: Math.sin(a) * 60, hx: Math.cos(h), hy: Math.sin(h), spark: 0 };
     });
   }
 
@@ -36,13 +47,19 @@ class BoidsSim implements SimulationModel {
     this.view = view;
   }
 
-  step(dt: number, p: ParamValues): void {
+  step(dt: number, p: ParamValues, m: MusicFrame): void {
+    this.stepped = true;
+    const spread = p.colourSpread as number;
+    const scheme = p.colours as string;
+    // Outside "follow the melody", the scheme slowly tints the flock by position.
+    const tint = scheme === "notes" ? 0 : dt * 0.6;
     const radius = p.radius as number;
     const r2 = radius * radius;
     const sepR2 = (radius * 0.4) ** 2;
     const maxSpeed = p.maxSpeed as number;
     const wander = p.wander as number;
     const lurePull = p.lure as number;
+    const home = p.home as number;
     const { width, height } = this.view;
     this.scatter = p.scatter as number;
 
@@ -57,7 +74,7 @@ class BoidsSim implements SimulationModel {
     }
 
     for (const b of this.boids) {
-      let ax = 0, ay = 0, cx = 0, cy = 0, sx = 0, sy = 0, n = 0;
+      let ax = 0, ay = 0, cx = 0, cy = 0, sx = 0, sy = 0, n = 0, hx = 0, hy = 0;
       const gx = Math.floor(b.x / cell);
       const gy = Math.floor(b.y / cell);
       for (let oy = -1; oy <= 1; oy++) {
@@ -72,6 +89,7 @@ class BoidsSim implements SimulationModel {
             if (d2 > r2) continue;
             n++;
             ax += o.vx; ay += o.vy;
+            hx += o.hx; hy += o.hy;
             cx += o.x; cy += o.y;
             if (d2 < sepR2 && d2 > 0) { sx -= dx / d2; sy -= dy / d2; }
           }
@@ -85,6 +103,25 @@ class BoidsSim implements SimulationModel {
         fy += (cy / n - b.y) * (p.cohesion as number);
         fx += sx * (p.separation as number) * 1000;
         fy += sy * (p.separation as number) * 1000;
+        // Colour spreads from neighbour to neighbour.
+        const k = Math.min(1, spread * dt);
+        b.hx += (hx / n - b.hx) * k;
+        b.hy += (hy / n - b.hy) * k;
+      }
+      if (tint > 0) {
+        const t = (schemeHue(scheme, b.x / width, m.hue, m.beats) * Math.PI) / 180;
+        b.hx += (Math.cos(t) - b.hx) * tint;
+        b.hy += (Math.sin(t) - b.hy) * tint;
+      }
+      const hl = Math.hypot(b.hx, b.hy) || 1;
+      b.hx /= hl; b.hy /= hl;
+      b.spark *= Math.exp(-dt * 5);
+      if (this.vortex) {
+        const dx = b.x - this.vortex.x, dy = b.y - this.vortex.y;
+        const d = Math.hypot(dx, dy) + 30;
+        const s = (this.vortex.dir * this.vortex.life * 200000) / (d * d) * 30;
+        fx += (-dy / d) * s - (dx / d) * s * 0.3;
+        fy += (dx / d) * s - (dy / d) * s * 0.3;
       }
       if (wander > 0) {
         // Random steering, so the flock frays and wobbles.
@@ -98,6 +135,9 @@ class BoidsSim implements SimulationModel {
         fx += (dx / d) * s;
         fy += (dy / d) * s;
       }
+      // A gentle pull home keeps the flock on screen between kicks.
+      fx += (width / 2 - b.x) * home;
+      fy += (height / 2 - b.y) * home;
       if (this.pointer) {
         const dx = this.pointer.x - b.x;
         const dy = this.pointer.y - b.y;
@@ -114,6 +154,7 @@ class BoidsSim implements SimulationModel {
       else if (speed < minSpeed && speed > 0) { b.vx *= minSpeed / speed; b.vy *= minSpeed / speed; }
     }
 
+    if (this.vortex && (this.vortex.life -= dt * 1.4) <= 0) this.vortex = null;
     for (const l of this.lures) l.life -= dt * 1.5;
     this.lures = this.lures.filter((l) => l.life > 0);
 
@@ -132,10 +173,17 @@ class BoidsSim implements SimulationModel {
   onNote(ev: NoteEvent): void {
     const { width, height } = this.view;
     if (ev.role === "tone") {
-      // The flock chases each note: left to right by pitch, and turns its colour.
-      this.lures.push({ x: width * (0.1 + ev.x * 0.8), y: height * (0.2 + noteHash(ev.note) * 0.6), life: 1, strength: ev.velocity });
+      // The flock chases each note, placed left to right by pitch, and the birds nearest it take its colour.
+      const lx = width * (0.1 + ev.x * 0.8), ly = height * (0.2 + noteHash(ev.note) * 0.6);
+      this.lures.push({ x: lx, y: ly, life: 1, strength: ev.velocity });
       if (this.lures.length > 6) this.lures.shift();
-      this.targetHue = noteHue(ev.note);
+      const h = (noteHue(ev.note) * Math.PI) / 180;
+      const r2 = (Math.min(width, height) * 0.22) ** 2;
+      for (const b of this.boids) {
+        if ((b.x - lx) ** 2 + (b.y - ly) ** 2 > r2) continue;
+        b.hx = Math.cos(h); b.hy = Math.sin(h);
+        b.spark = ev.velocity;
+      }
     } else if (ev.role === "kick") {
       // Scatter outward from the centre.
       for (const b of this.boids) {
@@ -145,28 +193,44 @@ class BoidsSim implements SimulationModel {
         b.vy += (dy / d) * this.scatter * ev.velocity;
       }
       this.flash = ev.velocity;
-    } else {
+    } else if (ev.role === "snare") {
+      // A vortex spins up somewhere and drags the flock round, turning the other way each time.
+      this.vortex = { x: width * (0.2 + Math.random() * 0.6), y: height * (0.2 + Math.random() * 0.6), life: ev.velocity, dir: this.vortex ? -this.vortex.dir : 1 };
       this.flash = Math.max(this.flash, ev.velocity * 0.5);
+    } else {
+      for (let k = 0; k < this.boids.length * 0.1; k++) this.boids[Math.floor(Math.random() * this.boids.length)].spark = ev.velocity;
     }
   }
 
-  render(g: CanvasRenderingContext2D, _view: Viewport, p: ParamValues): void {
+  render(g: CanvasRenderingContext2D, view: Viewport, p: ParamValues, m: MusicFrame): void {
+    applyFeedback(this.fb, g, view, p, this.stepped);
+    this.stepped = false;
     const z = p.size as number;
-    // Ease the flock's colour toward the last note's hue, the short way round.
-    const dh = ((this.targetHue - this.hue + 540) % 360) - 180;
-    this.hue = (this.hue + dh * 0.05 + 360) % 360;
-    g.fillStyle = `hsl(${this.hue} 70% ${60 + this.flash * 25}%)`;
+    const streak = (p.streak as number) * (1 + Math.min(1.5, m.bass) * 1.2);
     this.flash *= 0.9;
+    const light = 48 + this.flash * 20 + Math.min(1, m.level) * 8;
+    // Streaks, batched by hue so each colour is one stroke.
+    const paths = Array.from({ length: HUE_BUCKETS }, () => new Path2D());
+    const sparks = new Path2D();
     for (const b of this.boids) {
-      const a = Math.atan2(b.vy, b.vx);
-      const c = Math.cos(a), s = Math.sin(a);
-      g.beginPath();
-      g.moveTo(b.x + c * 7 * z, b.y + s * 7 * z);
-      g.lineTo(b.x - (c * 4 + s * 3.5) * z, b.y - (s * 4 - c * 3.5) * z);
-      g.lineTo(b.x - (c * 4 - s * 3.5) * z, b.y - (s * 4 + c * 3.5) * z);
-      g.closePath();
-      g.fill();
+      const hue = ((Math.atan2(b.hy, b.hx) * 180) / Math.PI + 360) % 360;
+      const path = paths[Math.floor(hue / (360 / HUE_BUCKETS)) % HUE_BUCKETS];
+      path.moveTo(b.x - b.vx * 0.06 * streak, b.y - b.vy * 0.06 * streak);
+      path.lineTo(b.x, b.y);
+      if (b.spark > 0.1) sparks.rect(b.x - 1.5 * z, b.y - 1.5 * z, 3 * z, 3 * z);
     }
+    g.globalCompositeOperation = "lighter";
+    g.lineCap = "round";
+    g.lineWidth = 1.6 * z;
+    for (let i = 0; i < HUE_BUCKETS; i++) {
+      g.strokeStyle = `hsla(${(i + 0.5) * (360 / HUE_BUCKETS)} 90% ${light}% / 0.5)`;
+      g.stroke(paths[i]);
+    }
+    g.fillStyle = `rgba(255,255,255,${0.6 + m.treble * 0.4})`;
+    g.fill(sparks);
+    g.lineWidth = 1;
+    g.lineCap = "butt";
+    g.globalCompositeOperation = "source-over";
   }
 
   stats(): string {
@@ -176,50 +240,61 @@ class BoidsSim implements SimulationModel {
 
 export const boids: ModelDefinition = {
   id: "boids",
-  name: "Flocking (boids)",
-  category: "Algorithmic",
-  description: "Agents following separation, alignment and cohesion rules form emergent flocks.",
-  hint: "Hold the mouse to attract the flock. Right-click or Shift to scatter it. The flock chases notes and takes on their colour; kicks scatter it.",
+  name: "Murmuration",
+  category: "Particles",
+  description: "A flock of light streaks. It chases every melody note, and the birds nearest the note take its colour, which then spreads through the flock bird to bird. Kicks scatter it, snares spin vortices through it, and the bass stretches the streaks.",
+  hint: "Hold the mouse to draw the flock in. Right-click or Shift to scatter it.",
   fixedDt: 1 / 60,
+  paintsBackground: true,
   params: [
     { kind: "number", key: "separation", label: "Separation", min: 0, max: 15, step: 0.1, default: 1.5, group: "Behaviour",
-      description: "How hard boids avoid crowding. High values spread the flock into a lattice." },
-    { kind: "number", key: "alignment", label: "Alignment", min: 0, max: 10, step: 0.1, default: 1, group: "Behaviour",
-      description: "How much boids match their neighbours' heading. High values form rivers." },
+      description: "How hard birds avoid crowding. High values spread the flock into a lattice." },
+    { kind: "number", key: "alignment", label: "Alignment", min: 0, max: 10, step: 0.1, default: 1.2, group: "Behaviour",
+      description: "How much birds match their neighbours' heading. High values form rivers of light." },
     { kind: "number", key: "cohesion", label: "Cohesion", min: 0, max: 15, step: 0.1, default: 0.8, group: "Behaviour",
-      description: "How strongly boids steer to the middle of their group. High values make tight balls." },
+      description: "How strongly birds steer to the middle of their group. High values make tight balls." },
     { kind: "number", key: "radius", label: "Vision radius", min: 5, max: 200, step: 1, default: 40, group: "Behaviour",
-      description: "How far each boid can see. Small makes many little groups, large one big flock." },
-    { kind: "number", key: "maxSpeed", label: "Max speed", min: 20, max: 900, step: 5, default: 140, group: "Motion",
-      description: "Top speed. Boids never drop below about a third of it." },
+      description: "How far each bird can see. Small makes many little groups, large one big flock." },
+    { kind: "number", key: "maxSpeed", label: "Max speed", min: 20, max: 900, step: 5, default: 160, group: "Motion",
+      description: "Top speed. Birds never drop below about a third of it." },
     { kind: "number", key: "wander", label: "Wander", min: 0, max: 1500, step: 10, default: 0, group: "Motion",
       description: "Random steering that makes the flock jitter and fray apart." },
-    { kind: "number", key: "lure", label: "Note pull", min: 0, max: 5, step: 0.1, default: 1, group: "Motion",
+    { kind: "number", key: "lure", label: "Note pull", min: 0, max: 5, step: 0.1, default: 1.2, group: "Music",
       description: "How strongly the flock chases each melody note." },
-    { kind: "number", key: "scatter", label: "Kick scatter", min: 0, max: 800, step: 10, default: 160, group: "Motion",
+    { kind: "number", key: "home", label: "Centre pull", min: 0, max: 5, step: 0.05, default: 0.6, group: "Motion",
+      description: "How strongly the flock is drawn back to the middle of the screen. Zero lets it roam and wrap round the edges." },
+    { kind: "number", key: "scatter", label: "Kick scatter", min: 0, max: 800, step: 10, default: 180, group: "Music",
       description: "How hard a kick drum blasts the flock outward from the centre." },
-    { kind: "number", key: "size", label: "Boid size", min: 0.4, max: 4, step: 0.1, default: 1, group: "Look",
-      description: "Size of each boid's arrow." },
-    { kind: "number", key: "count", label: "Boids", min: 10, max: 3000, step: 10, default: 600, resetOnChange: true, group: "Setup",
-      description: "How many boids. Rebuilds the flock." },
+    { kind: "number", key: "colourSpread", label: "Colour spread", min: 0, max: 10, step: 0.1, default: 1.5, group: "Music",
+      description: "How fast a note's colour passes from bird to bird. Zero keeps each bird the colour it was given." },
+    colourParam("notes"),
+    { kind: "number", key: "streak", label: "Streak length", min: 0, max: 6, step: 0.05, default: 1.2, group: "Look",
+      description: "How long a streak each bird draws behind it. The bass stretches it further." },
+    { kind: "number", key: "size", label: "Line width", min: 0.4, max: 5, step: 0.1, default: 1, group: "Look",
+      description: "How thick each streak is." },
+    ...feedbackParams(0.8, 0, 0),
+    { kind: "number", key: "count", label: "Birds", min: 10, max: 4000, step: 10, default: 900, resetOnChange: true, group: "Setup",
+      description: "How many birds. Rebuilds the flock." },
   ],
   macros: [
     { key: "swarm", label: "Swarm", targets: [{ param: "cohesion", amount: 0.6 }, { param: "alignment", amount: 0.4 }, { param: "separation", amount: -0.2 }, { param: "radius", amount: 0.3 }] },
     { key: "panic", label: "Panic", targets: [{ param: "separation", amount: 0.6 }, { param: "maxSpeed", amount: 0.6 }, { param: "wander", amount: 0.6 }, { param: "alignment", amount: -0.5 }] },
-    { key: "school", label: "School", targets: [{ param: "alignment", amount: 0.9 }, { param: "radius", amount: 0.5 }, { param: "maxSpeed", amount: 0.3 }, { param: "cohesion", amount: -0.2 }] },
+    { key: "dream", label: "Dream", targets: [{ param: "afterglow", amount: 0.2 }, { param: "zoom", amount: 0.15 }, { param: "spin", amount: 0.1 }, { param: "streak", amount: 0.3 }] },
   ],
   modulations: [
-    { source: "kick", target: "maxSpeed", amount: 0.4 },
-    { source: "snare", target: "wander", amount: 0.5 },
-    { source: "tone", target: "alignment", amount: 0.4 },
-    { source: "lfoBar", target: "cohesion", amount: 0.3 },
-    { source: "bass", target: "size", amount: 0.5 },
+    { source: "kick", target: "maxSpeed", amount: 0.35 },
+    { source: "tone", target: "alignment", amount: 0.3 },
+    { source: "lfoBar", target: "cohesion", amount: 0.25 },
+    { source: "treble", target: "size", amount: 0.2 },
   ],
   reactions: [
-    { role: "tone", text: "The flock chases the note, placed by pitch, and takes its colour" },
-    { role: "kick", text: "Blasts the flock outward from the centre and flashes it" },
-    { role: "snare", text: "Flashes the flock brighter" },
-    { role: "hat", text: "Flashes the flock brighter" },
+    { source: "tone", text: "The flock chases the note, placed by pitch, and nearby birds take its colour" },
+    { source: "kick", text: "Blasts the flock outward from the centre and flashes it" },
+    { source: "snare", text: "Spins a vortex through the flock, alternating direction" },
+    { source: "hat", text: "A sprinkling of birds sparkle" },
+    { source: "bass", text: "Stretches the streaks" },
+    { source: "level", text: "The flock glows brighter as the music gets louder" },
+    { source: "treble", text: "Sparkles shine brighter" },
   ],
   create: () => new BoidsSim(),
 };

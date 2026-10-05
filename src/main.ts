@@ -1,5 +1,5 @@
 import { models, findModel } from "./models/registry";
-import { defaultParams, type ModelDefinition, type ParamSpec, type ParamValues, type PointerInput, type SimulationModel, type Viewport } from "./models/types";
+import { defaultParams, SILENT_MUSIC, type ModelDefinition, type MusicFrame, type ParamSpec, type ParamValues, type PointerInput, type SimulationModel, type Viewport } from "./models/types";
 import { renderParamControls } from "./ui/controls";
 import { Studio } from "./music/studio";
 
@@ -25,6 +25,8 @@ let model: SimulationModel;
 let params: ParamValues;
 /** What the model sees: slider values pushed by macros and modulation. */
 let effective: ParamValues = {};
+/** What the music is doing this frame, as the model sees it. */
+let music: MusicFrame = SILENT_MUSIC;
 let view: Viewport = { width: 1, height: 1 };
 let running = true;
 let accumulator = 0;
@@ -63,6 +65,9 @@ function loadModel(id: string): void {
   model = def.create();
   model.reset(view, effective);
   accumulator = 0;
+  // Models that paint their own background would otherwise fade in over the previous one.
+  g.fillStyle = "#0d1117";
+  g.fillRect(0, 0, view.width, view.height);
   description.textContent = def.description;
   hint.textContent = def.hint ?? "No canvas interaction for this model.";
   const onChange = (spec: ParamSpec) => {
@@ -131,7 +136,7 @@ function setRunning(value: boolean): void {
 }
 
 playPause.addEventListener("click", () => setRunning(!running));
-stepBtn.addEventListener("click", () => model.step(def.fixedDt ?? 1 / 60, effective));
+stepBtn.addEventListener("click", () => model.step(def.fixedDt ?? 1 / 60, effective, music));
 resetBtn.addEventListener("click", () => model.reset(view, effective));
 select.addEventListener("change", () => loadModel(select.value));
 
@@ -140,7 +145,7 @@ window.addEventListener("keydown", (e) => {
   if (e.code === "Space") { e.preventDefault(); setRunning(!running); }
   else if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement)) { e.preventDefault(); studio.toggleSequencer(); }
   else if (e.key === "r") model.reset(view, effective);
-  else if (e.key === "." && !running) model.step(def.fixedDt ?? 1 / 60, effective);
+  else if (e.key === "." && !running) model.step(def.fixedDt ?? 1 / 60, effective, music);
 });
 
 // ---- Main loop -------------------------------------------------------------
@@ -152,6 +157,7 @@ function frame(now: number): void {
 
   const notes = studio.frame(now / 1000, elapsed);
   studio.apply(effective);
+  music = studio.music();
   if (running && model.onNote) for (const n of notes) if (studio.reacts(n.role)) model.onNote(n, effective);
 
   if (running) {
@@ -160,16 +166,18 @@ function frame(now: number): void {
     accumulator += elapsed;
     let steps = 0;
     while (accumulator >= dt && steps < MAX_STEPS_PER_FRAME) {
-      model.step(dt, effective);
+      model.step(dt, effective, music);
       accumulator -= dt;
       steps++;
     }
     if (steps === MAX_STEPS_PER_FRAME) accumulator = 0; // drop time rather than spiral
   }
 
-  g.fillStyle = "#0d1117";
-  g.fillRect(0, 0, view.width, view.height);
-  model.render(g, view, effective);
+  if (!def.paintsBackground) {
+    g.fillStyle = "#0d1117";
+    g.fillRect(0, 0, view.width, view.height);
+  }
+  model.render(g, view, effective, music);
 
   const extra = model.stats?.();
   statsEl.textContent = `${Math.round(fps)} fps${extra ? ` · ${extra}` : ""}`;

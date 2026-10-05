@@ -62,6 +62,12 @@ export interface PointerInput {
   shift: boolean;
 }
 
+/**
+ * What a built-in reaction listens to: a kind of note, an audio band, the
+ * spectrum (and waveform), or the beat clock.
+ */
+export type ReactionSource = NoteRole | "level" | "bass" | "mid" | "treble" | "spectrum" | "beat";
+
 /** What kind of hit a note is. Drum sounds are told apart so models can react to the beat. */
 export type NoteRole = "kick" | "snare" | "hat" | "tone";
 
@@ -107,13 +113,56 @@ export interface ModRoute {
   off?: boolean;
 }
 
+/**
+ * What the music is doing right now, handed to `step` and `render` every
+ * frame so models can move with the sound continuously, not only on hits.
+ * Every value is already scaled by the global music Intensity (so it can go
+ * above 1) and is zero when music is switched off or the matching built-in
+ * reaction is switched off in the modulation matrix.
+ */
+export interface MusicFrame {
+  /** Drum and melody envelopes: jump to the hit's velocity, then decay. */
+  kick: number;
+  snare: number;
+  hat: number;
+  tone: number;
+  /** Loudness of everything playing, and its bass, mid and treble bands, roughly 0..1. */
+  level: number;
+  bass: number;
+  mid: number;
+  treble: number;
+  /** Log-spaced spectrum, lowest frequencies first, each 0..1. */
+  spectrum: Float32Array;
+  /** A snapshot of the waveform, -1..1. */
+  wave: Float32Array;
+  /** Musical clock in beats (quarter notes). Always runs, so it can drive slow colour cycles. */
+  beats: number;
+  /** 1 right on each beat, easing to 0 before the next one. */
+  pulse: number;
+  /** Hue in degrees of the last melody note, and how high it was, 0..1. */
+  hue: number;
+  pitch: number;
+  /** Overall activity, a blend of loudness and recent hits. */
+  energy: number;
+}
+
+/** A silent frame, for stepping a model outside the main loop. */
+export const SILENT_MUSIC: MusicFrame = {
+  kick: 0, snare: 0, hat: 0, tone: 0, level: 0, bass: 0, mid: 0, treble: 0,
+  spectrum: new Float32Array(48), wave: new Float32Array(128),
+  beats: 0, pulse: 0, hue: 210, pitch: 0.5, energy: 0,
+};
+
 export interface SimulationModel {
   /** (Re)create the model's state for the given viewport and parameters. */
   reset(view: Viewport, params: ParamValues): void;
   /** Advance the simulation by `dt` seconds. */
-  step(dt: number, params: ParamValues): void;
-  /** Draw the current state. The canvas is already cleared. */
-  render(g: CanvasRenderingContext2D, view: Viewport, params: ParamValues): void;
+  step(dt: number, params: ParamValues, music: MusicFrame): void;
+  /**
+   * Draw the current state. The canvas is already cleared, unless the
+   * definition sets `paintsBackground`.
+   */
+  render(g: CanvasRenderingContext2D, view: Viewport, params: ParamValues, music: MusicFrame): void;
   /** Optional: react to mouse / touch input on the canvas. */
   onPointer?(input: PointerInput, params: ParamValues): void;
   /** Optional: keep state valid when the canvas size changes. */
@@ -127,7 +176,7 @@ export interface SimulationModel {
 export interface ModelDefinition {
   id: string;
   name: string;
-  category: "Particle physics" | "Mechanics" | "Waves & fluids" | "Algorithmic" | "Sound & music" | "Custom";
+  category: "Particles" | "Surfaces" | "Custom";
   description: string;
   /** One line telling the user how to interact with the canvas. */
   hint?: string;
@@ -142,10 +191,17 @@ export interface ModelDefinition {
   /** Modulation routes the model starts with, so music does something out of the box. */
   modulations?: ModRoute[];
   /**
-   * What `onNote` does for each kind of hit, listed in the modulation matrix
-   * so the user can see (and switch off) the built-in reactions.
+   * Everything the model does with the music by itself (in `onNote`, and with
+   * the `MusicFrame`), listed in the modulation matrix so the user can see and
+   * switch off each one. Switching one off stops those notes reaching
+   * `onNote` and zeroes that part of the `MusicFrame`.
    */
-  reactions?: { role: NoteRole; text: string }[];
+  reactions?: { source: ReactionSource; text: string }[];
+  /**
+   * The model paints its own background each frame (e.g. to leave fading
+   * trails), so the host doesn't clear the canvas first.
+   */
+  paintsBackground?: boolean;
   create(): SimulationModel;
 }
 

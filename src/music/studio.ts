@@ -1,4 +1,5 @@
-import type { ModRoute, ModelDefinition, NoteEvent, NoteRole, ParamSpec, ParamValues } from "../models/types";
+import { SILENT_MUSIC, type ModRoute, type ModelDefinition, type MusicFrame, type NoteEvent, type ParamSpec, type ParamValues, type ReactionSource } from "../models/types";
+import { noteHue } from "../models/lib/music";
 import { renderParamControls, type ParamControls } from "../ui/controls";
 import { AudioEngine, BeatDetector, type Waveform } from "./audio";
 import { dispatchMidi, openMidi, type MidiInputs } from "./midi";
@@ -26,14 +27,14 @@ interface GlobalSettings {
  * Bump when models' default routes change enough that saved per-model
  * settings should be replaced by the new defaults.
  */
-const MODEL_SETTINGS_VERSION = 2;
+const MODEL_SETTINGS_VERSION = 3;
 
 interface ModelSettings {
   v: number;
   macros: Record<string, number>;
   routes: ModRoute[];
-  /** Note reactions switched off for this model. */
-  muted: NoteRole[];
+  /** Built-in reactions switched off for this model. */
+  muted: ReactionSource[];
 }
 
 /** The generator's live controls, shown as sliders and mappable with MIDI learn. */
@@ -48,7 +49,16 @@ const GEN_SPECS: ParamSpec[] = [
     description: "How many scale notes the melody wanders across." },
 ];
 
-const ROLE_LABELS: Record<NoteRole, string> = { kick: "Kick", snare: "Snare", hat: "Hi-hat", tone: "Melody notes" };
+const REACTION_LABELS: Record<ReactionSource, string> = {
+  kick: "Kick", snare: "Snare", hat: "Hi-hat", tone: "Melody notes",
+  level: "Sound level", bass: "Bass", mid: "Mids", treble: "Treble", spectrum: "Spectrum", beat: "Beat",
+};
+
+/** The modulation source whose live value the matrix shows next to each reaction. */
+const REACTION_METERS: Record<ReactionSource, string> = {
+  kick: "kick", snare: "snare", hat: "hat", tone: "tone",
+  level: "level", bass: "bass", mid: "mid", treble: "treble", spectrum: "level", beat: "lfoBeat",
+};
 
 function load<T>(key: string): T | null {
   try {
@@ -110,6 +120,10 @@ export class Studio {
   /** Music that was playing when the simulation was paused, to resume with it. */
   private pausedMusic: { seq: boolean; file: boolean } | null = null;
   private player: HTMLAudioElement | null = null;
+  /** The music feed handed to the model each frame; reused to avoid garbage. */
+  private feed: MusicFrame = { ...SILENT_MUSIC, spectrum: new Float32Array(SILENT_MUSIC.spectrum.length), wave: new Float32Array(SILENT_MUSIC.wave.length) };
+  private beatsNow = 0;
+  private lastTone = { hue: 210, pitch: 0.5 };
 
   constructor() {
     const saved = load<Partial<GlobalSettings>>("music:global") ?? {};
@@ -186,16 +200,51 @@ export class Studio {
     }
     const events = [...this.seq.drain(), ...this.pending];
     this.pending = [];
-    for (const ev of events) this.sources.trigger(ev);
-    this.sources.update(dt, this.seq.beats(nowSeconds), bands);
+    for (const ev of events) {
+      this.sources.trigger(ev);
+      if (ev.role === "tone") this.lastTone = { hue: noteHue(ev.note), pitch: ev.x };
+    }
+    this.beatsNow = this.seq.beats(nowSeconds);
+    this.sources.update(dt, this.beatsNow, bands);
     this.drawView();
     this.updateMeters();
     return events;
   }
 
   /** Whether the model's own reaction to this kind of note is switched on. */
-  reacts(role: NoteRole): boolean {
+  reacts(role: ReactionSource): boolean {
     return this.settings.musicOn && !this.modelSettings.muted.includes(role);
+  }
+
+  /**
+   * The continuous music feed for the model this frame: envelopes, bands,
+   * spectrum and beat, scaled by Intensity, with switched-off reactions zeroed.
+   */
+  music(): MusicFrame {
+    const f = this.feed;
+    const depth = this.settings.musicOn ? this.settings.intensity : 0;
+    const muted = this.modelSettings.muted;
+    const val = (r: ReactionSource, v: number) => (muted.includes(r) ? 0 : v * depth);
+    const src = this.sources;
+    f.kick = val("kick", src.get("kick"));
+    f.snare = val("snare", src.get("snare"));
+    f.hat = val("hat", src.get("hat"));
+    f.tone = val("tone", src.get("tone"));
+    f.level = val("level", src.get("level"));
+    f.bass = val("bass", src.get("bass"));
+    f.mid = val("mid", src.get("mid"));
+    f.treble = val("treble", src.get("treble"));
+    const shape = muted.includes("spectrum") ? 0 : depth;
+    for (let i = 0; i < f.spectrum.length; i++) f.spectrum[i] = this.audio.spectrum[i] * shape;
+    for (let i = 0; i < f.wave.length; i++) f.wave[i] = this.audio.scope[i] * shape;
+    f.beats = this.beatsNow;
+    // The beat pulse only means something while the sequencer keeps time.
+    const phase = this.beatsNow - Math.floor(this.beatsNow);
+    f.pulse = this.seq.playing ? val("beat", (1 - phase) ** 3) : 0;
+    f.hue = this.lastTone.hue;
+    f.pitch = this.lastTone.pitch;
+    f.energy = Math.max(f.level, f.kick * 0.7 + f.snare * 0.45 + f.tone * 0.35 + f.hat * 0.15);
+    return f;
   }
 
   /**
@@ -736,7 +785,7 @@ export class Studio {
     }
   }
 
-  /** Draw the modulation matrix: the model's note reactions, then its routes. */
+  /** Draw the modulation matrix: the model's built-in reactions, then its routes. */
   private renderRoutes(): void {
     this.sourceMeters = [];
     this.renderReactions();
@@ -807,27 +856,27 @@ export class Studio {
     this.showRouteBadges();
   }
 
-  /** List the model's built-in note reactions, each with a switch and a live hit meter. */
+  /** List the model's built-in reactions, each with a switch and a live meter. */
   private renderReactions(): void {
     const box = $("mod-reactions");
     box.replaceChildren();
     const reactions = this.def?.reactions ?? [];
     if (reactions.length === 0) {
-      box.append(el("p", { className: "muted", textContent: "This model doesn't react to notes directly; routes are how music reaches it." }));
+      box.append(el("p", { className: "muted", textContent: "This model doesn't react to music by itself; routes are how music reaches it." }));
       return;
     }
     for (const r of reactions) {
-      const input = el("input", { type: "checkbox", checked: !this.modelSettings.muted.includes(r.role) });
+      const input = el("input", { type: "checkbox", checked: !this.modelSettings.muted.includes(r.source) });
       input.addEventListener("change", () => {
         const muted = new Set(this.modelSettings.muted);
-        if (input.checked) muted.delete(r.role);
-        else muted.add(r.role);
+        if (input.checked) muted.delete(r.source);
+        else muted.add(r.source);
         this.modelSettings.muted = [...muted];
         this.saveModel();
       });
       const fill = el("div", { className: "meter-fill" });
-      this.sourceMeters.push({ bar: fill, source: () => r.role });
-      box.append(el("label", { className: "reaction" }, input, el("span", { className: "reaction-role", textContent: ROLE_LABELS[r.role] }), el("div", { className: "meter-track" }, fill), el("span", { className: "muted", textContent: r.text })));
+      this.sourceMeters.push({ bar: fill, source: () => REACTION_METERS[r.source] });
+      box.append(el("label", { className: "reaction" }, input, el("span", { className: "reaction-role", textContent: REACTION_LABELS[r.source] }), el("div", { className: "meter-track" }, fill), el("span", { className: "muted", textContent: r.text })));
     }
   }
 
