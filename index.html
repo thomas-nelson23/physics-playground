@@ -56,6 +56,7 @@
           <div id="dock-body">
             <div class="tab" data-tab="sequencer">
               <div class="seq-controls">
+                <label>Style <select id="seq-style"></select></label>
                 <label>Scale <select id="seq-scale"></select></label>
                 <label>Root <select id="seq-root"></select></label>
                 <label>Synth <select id="seq-wave">
@@ -67,12 +68,20 @@
                 <label>Swing <input id="seq-swing" type="range" min="0" max="0.8" step="0.05" /></label>
                 <label>Volume <input id="seq-volume" type="range" min="0" max="1" step="0.01" /></label>
                 <label class="check"><input id="seq-sound" type="checkbox" /> Sound on</label>
+              </div>
+              <div class="gen-knobs">
+                <div id="gen-sliders"></div>
                 <div class="row-buttons">
-                  <button type="button" id="seq-random">Randomise</button>
-                  <button type="button" id="seq-clear">Clear</button>
+                  <button type="button" id="gen-new" title="Start from a fresh pattern and melody">New idea</button>
+                  <button type="button" id="gen-fill" title="Play a drum fill at the end of the bar">Fill</button>
+                  <button type="button" id="gen-hold" title="Freeze the pattern so it stops evolving">Hold</button>
                 </div>
               </div>
-              <div id="seq-grid"></div>
+              <div class="gen-pad-wrap">
+                <canvas id="gen-pad" width="150" height="150" title="Drag: left-right sets drum density, up-down sets melody density"></canvas>
+                <div class="gen-pad-label">Drums →<br />Melody ↑</div>
+              </div>
+              <div class="gen-view-wrap"><canvas id="gen-view"></canvas></div>
             </div>
             <div class="tab" data-tab="modulation" hidden>
               <div class="mod-layout">

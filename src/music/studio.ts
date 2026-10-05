@@ -3,7 +3,7 @@ import { renderParamControls, type ParamControls } from "../ui/controls";
 import { AudioEngine, BeatDetector, type Waveform } from "./audio";
 import { dispatchMidi, openMidi, type MidiInputs } from "./midi";
 import { applyModulation, macroSpecs, modulatable, ModSources, SOURCES, sourceLabel } from "./modulation";
-import { DRUMS, ROOTS, SCALES, Sequencer, STEPS, TONE_ROWS, defaultPattern, type SequencerState } from "./sequencer";
+import { DRUMS, ROOTS, SCALES, STEPS, STYLES, Sequencer, sanitizeState, type SequencerState } from "./sequencer";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -35,6 +35,18 @@ interface ModelSettings {
   /** Note reactions switched off for this model. */
   muted: NoteRole[];
 }
+
+/** The generator's live controls, shown as sliders and mappable with MIDI learn. */
+const GEN_SPECS: ParamSpec[] = [
+  { kind: "number", key: "drumDensity", label: "Drum density", min: 0, max: 1, step: 0.01, default: 0.5,
+    description: "How many drum hits play. Low keeps the backbone; high fills in ghost notes and rolls." },
+  { kind: "number", key: "melodyDensity", label: "Melody density", min: 0, max: 1, step: 0.01, default: 0.45,
+    description: "How many melody notes play. Low leaves long held notes; high fills in runs between them." },
+  { kind: "number", key: "variation", label: "Variation", min: 0, max: 1, step: 0.01, default: 0.35,
+    description: "How much the pattern changes each bar, and how often it plays a fill." },
+  { kind: "number", key: "range", label: "Melody range", min: 2, max: 16, step: 1, default: 8,
+    description: "How many scale notes the melody wanders across." },
+];
 
 const ROLE_LABELS: Record<NoteRole, string> = { kick: "Kick", snare: "Snare", hat: "Hi-hat", tone: "Melody notes" };
 
@@ -87,9 +99,12 @@ export class Studio {
   private learning = false;
   private learnTarget: string | null = null;
   private ledTimer = 0;
-  private gridCells: HTMLElement[][] = [];
+  private genControls: ParamControls | null = null;
+  private padCtx: CanvasRenderingContext2D | null = null;
+  private viewCtx: CanvasRenderingContext2D | null = null;
+  /** Version and playhead the pattern view last drew, to skip redundant redraws. */
+  private viewDrawn = "";
   private meterBars: Record<string, HTMLElement> = {};
-  private lastStepShown = -2;
   /** Live source bars in the matrix, refreshed while the Modulation tab is open. */
   private sourceMeters: { bar: HTMLElement; source: () => string }[] = [];
   /** Music that was playing when the simulation was paused, to resume with it. */
@@ -98,7 +113,7 @@ export class Studio {
 
   constructor() {
     const saved = load<Partial<GlobalSettings>>("music:global") ?? {};
-    const seq = { ...defaultPattern(), ...(saved.seq ?? {}) };
+    const seq = sanitizeState(saved.seq);
     this.settings = {
       volume: 0.7, thru: true, decay: 0.25, inputs: [], bindings: {}, dockHidden: false, musicOn: true, intensity: 1,
       ...saved,
@@ -173,7 +188,7 @@ export class Studio {
     this.pending = [];
     for (const ev of events) this.sources.trigger(ev);
     this.sources.update(dt, this.seq.beats(nowSeconds), bands);
-    this.updatePlayhead();
+    this.drawView();
     this.updateMeters();
     return events;
   }
@@ -298,7 +313,12 @@ export class Studio {
       this.renderBindings();
     }
     const binding = this.settings.bindings[n];
-    if (!binding || !this.def) return;
+    if (!binding) return;
+    if (binding.startsWith("gen#")) {
+      this.setGen(binding.slice(4), v);
+      return;
+    }
+    if (!this.def) return;
     if (binding.startsWith("macro#")) {
       const m = this.def.macros?.[Number(binding.slice(6))];
       if (!m) return;
@@ -334,12 +354,13 @@ export class Studio {
     document.body.classList.toggle("learning", on);
     document.querySelectorAll(".param.learn-target").forEach((e) => e.classList.remove("learn-target"));
     $("midi-learn-help").textContent = on
-      ? "Now click a slider or macro in the sidebar, then move a knob on your controller."
-      : "Click MIDI learn, click a slider or macro, then move a knob on your controller.";
+      ? "Now click a slider or macro in the sidebar (or a sequencer slider), then move a knob on your controller."
+      : "Click MIDI learn, click a slider or macro, then move a knob on your controller. Sequencer sliders can be mapped too.";
   }
 
   /** Translate a sidebar row's data-target into a binding target. */
   private bindingFor(rowTarget: string): string | null {
+    if (rowTarget.startsWith("gen:")) return `gen#${rowTarget.slice(4)}`;
     if (!this.def) return null;
     if (rowTarget.startsWith("macro:")) {
       const i = (this.def.macros ?? []).findIndex((m) => m.key === rowTarget.slice(6));
@@ -349,6 +370,10 @@ export class Studio {
   }
 
   private bindingLabel(target: string): string | null {
+    if (target.startsWith("gen#")) {
+      const spec = GEN_SPECS.find((p) => p.key === target.slice(4));
+      return spec ? `Sequencer: ${spec.label}` : null;
+    }
     if (!this.def) return null;
     if (target.startsWith("macro#")) {
       const i = Number(target.slice(6));
@@ -409,14 +434,18 @@ export class Studio {
     });
 
     // Sequencer settings
+    const style = $<HTMLSelectElement>("seq-style");
+    for (const [id, st] of Object.entries(STYLES)) style.append(el("option", { value: id, textContent: st.label }));
+    style.value = s.seq.style;
+    style.addEventListener("change", () => { s.seq.style = style.value; this.seq.version++; this.saveGlobal(); style.blur(); });
     const scale = $<HTMLSelectElement>("seq-scale");
     for (const [id, sc] of Object.entries(SCALES)) scale.append(el("option", { value: id, textContent: sc.label }));
     scale.value = s.seq.scale;
-    scale.addEventListener("change", () => { s.seq.scale = scale.value; this.saveGlobal(); this.labelRows(); scale.blur(); });
+    scale.addEventListener("change", () => { s.seq.scale = scale.value; this.saveGlobal(); scale.blur(); });
     const root = $<HTMLSelectElement>("seq-root");
     ROOTS.forEach((r, i) => root.append(el("option", { value: String(i), textContent: r })));
     root.value = String(s.seq.root);
-    root.addEventListener("change", () => { s.seq.root = Number(root.value); this.saveGlobal(); this.labelRows(); root.blur(); });
+    root.addEventListener("change", () => { s.seq.root = Number(root.value); this.saveGlobal(); root.blur(); });
     const wave = $<HTMLSelectElement>("seq-wave");
     wave.addEventListener("change", () => { this.audio.waveform = wave.value as Waveform; wave.blur(); });
     const swing = $<HTMLInputElement>("seq-swing");
@@ -428,9 +457,24 @@ export class Studio {
     const sound = $<HTMLInputElement>("seq-sound");
     sound.checked = s.seq.sound;
     sound.addEventListener("change", () => { s.seq.sound = sound.checked; this.saveGlobal(); });
-    $("seq-random").addEventListener("click", () => { this.seq.randomize(); this.saveGlobal(); this.paintGrid(); });
-    $("seq-clear").addEventListener("click", () => { this.seq.clear(); this.saveGlobal(); this.paintGrid(); });
-    this.buildGrid();
+
+    // Generator
+    this.genControls = renderParamControls($("gen-sliders"), GEN_SPECS, s.seq as unknown as ParamValues, () => this.saveGlobal(), "gen:");
+    // The panel is short, so descriptions show as tooltips here instead of under each slider.
+    for (const row of $("gen-sliders").querySelectorAll<HTMLElement>(".param[data-target]")) {
+      row.title = GEN_SPECS.find((p) => `gen:${p.key}` === row.dataset.target)?.description ?? "";
+    }
+    $("gen-new").addEventListener("click", () => { this.seq.newIdea(); this.saveGlobal(); });
+    $("gen-fill").addEventListener("click", () => this.seq.fill());
+    const hold = $<HTMLButtonElement>("gen-hold");
+    hold.classList.toggle("active", s.seq.hold);
+    hold.addEventListener("click", () => {
+      s.seq.hold = !s.seq.hold;
+      hold.classList.toggle("active", s.seq.hold);
+      this.saveGlobal();
+    });
+    this.buildPad();
+    this.viewCtx = $<HTMLCanvasElement>("gen-view").getContext("2d");
 
     // Modulation
     $("mod-add").addEventListener("click", () => {
@@ -484,7 +528,7 @@ export class Studio {
     thru.checked = s.thru;
     thru.addEventListener("change", () => { s.thru = thru.checked; this.saveGlobal(); });
     $("midi-learn").addEventListener("click", () => this.setLearning(!this.learning));
-    $("sidebar").addEventListener("pointerdown", (e) => {
+    const pickTarget = (e: PointerEvent) => {
       if (!this.learning) return;
       const row = (e.target as HTMLElement).closest<HTMLElement>(".param[data-target]");
       if (!row) return;
@@ -493,7 +537,9 @@ export class Studio {
       document.querySelectorAll(".param.learn-target").forEach((x) => x.classList.remove("learn-target"));
       row.classList.add("learn-target");
       this.learnTarget = target;
-    });
+    };
+    $("sidebar").addEventListener("pointerdown", pickTarget);
+    $("gen-sliders").addEventListener("pointerdown", pickTarget);
 
     // Audio file
     const file = $<HTMLInputElement>("audio-file");
@@ -539,87 +585,146 @@ export class Studio {
     play.classList.toggle("playing", this.seq.playing);
   }
 
-  private buildGrid(): void {
-    const gridEl = $("seq-grid");
-    gridEl.replaceChildren();
-    this.gridCells = [];
-    let paint: boolean | null = null;
-    window.addEventListener("pointerup", () => (paint = null));
-    // Rows top to bottom: highest tone first, then the drums.
-    const rows: { label: string; cells: boolean[]; tone: boolean }[] = [];
-    for (let r = TONE_ROWS - 1; r >= 0; r--) rows.push({ label: "", cells: this.seq.state.tones[r], tone: true });
-    for (const [i, d] of DRUMS.entries()) rows.push({ label: d.label, cells: this.seq.state.drums[i], tone: false });
-    rows.forEach((row, ri) => {
-      const rowEl = el("div", { className: `seq-row${row.tone ? "" : " drum"}` });
-      rowEl.append(el("span", { className: "seq-label", textContent: row.label }));
-      const cells: HTMLElement[] = [];
-      for (let i = 0; i < STEPS; i++) {
-        const cell = el("div", { className: `seq-cell${i % 4 === 0 ? " bar" : ""}` });
-        const set = (v: boolean) => {
-          const arr = this.rowArray(ri);
-          arr[i] = v;
-          cell.classList.toggle("on", v);
-        };
-        cell.addEventListener("pointerdown", (e) => {
-          e.preventDefault();
-          paint = !this.rowArray(ri)[i];
-          set(paint);
-          this.saveGlobal();
-          if (paint && !this.seq.playing) this.preview(ri);
-        });
-        cell.addEventListener("pointerenter", () => {
-          if (paint === null) return;
-          set(paint);
-          this.saveGlobal();
-        });
-        cells.push(cell);
-        rowEl.append(cell);
+  /** Set a generator control from a 0..1 knob position (MIDI CC). */
+  private setGen(key: string, v: number): void {
+    const spec = GEN_SPECS.find((p) => p.key === key);
+    if (!spec || spec.kind !== "number") return;
+    const value = Math.round((spec.min + v * (spec.max - spec.min)) / spec.step) * spec.step;
+    (this.settings.seq as unknown as Record<string, number>)[key] = Math.min(spec.max, Math.max(spec.min, value));
+    this.genControls?.refresh();
+    this.saveGlobal();
+  }
+
+  /** The XY pad: left-right is drum density, bottom-top is melody density. */
+  private buildPad(): void {
+    const pad = $<HTMLCanvasElement>("gen-pad");
+    const dpr = window.devicePixelRatio || 1;
+    pad.width = pad.height = Math.round(150 * dpr);
+    this.padCtx = pad.getContext("2d");
+    this.padCtx?.scale(dpr, dpr);
+    let dragging = false;
+    const set = (e: PointerEvent) => {
+      const r = pad.getBoundingClientRect();
+      const clamp = (x: number) => Math.round(Math.min(1, Math.max(0, x)) * 100) / 100;
+      this.settings.seq.drumDensity = clamp((e.clientX - r.left) / r.width);
+      this.settings.seq.melodyDensity = clamp(1 - (e.clientY - r.top) / r.height);
+      this.genControls?.refresh();
+    };
+    pad.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      pad.setPointerCapture(e.pointerId);
+      set(e);
+    });
+    pad.addEventListener("pointermove", (e) => dragging && set(e));
+    const end = () => {
+      if (!dragging) return;
+      dragging = false;
+      this.saveGlobal();
+    };
+    pad.addEventListener("pointerup", end);
+    pad.addEventListener("pointercancel", end);
+  }
+
+  /** Redraw the pad and the bar view while the Sequencer tab is open. */
+  private drawView(): void {
+    const canvas = this.viewCtx?.canvas;
+    if (!canvas || canvas.offsetParent === null || $("dock").classList.contains("collapsed")) return;
+    this.drawPad();
+    const seq = this.settings.seq;
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const key = [this.seq.version, this.seq.current, seq.drumDensity, seq.melodyDensity, seq.range, seq.style, w, h, dpr].join("|");
+    if (key === this.viewDrawn) return;
+    this.viewDrawn = key;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+    }
+    const g = this.viewCtx!;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = "#0d1117";
+    g.fillRect(0, 0, w, h);
+    const bar = this.seq.view();
+    const labelW = 40, gap = 2;
+    const colW = (w - labelW) / STEPS;
+    const drumRowH = 14;
+    const drumTop = h - DRUMS.length * (drumRowH + gap);
+    const melTop = 4, melH = drumTop - 10 - melTop;
+    const half = Math.max(1, Math.floor(seq.range / 2));
+
+    // Beat columns and playhead.
+    for (let i = 0; i < STEPS; i++) {
+      const x = labelW + i * colW;
+      g.fillStyle = i === this.seq.current ? "#30363d" : i % 4 === 0 ? "#1c2128" : "#161b22";
+      g.fillRect(x + 1, 0, colW - gap, h);
+      if (bar.fill && i >= 12) {
+        g.fillStyle = "rgba(210, 168, 255, 0.08)";
+        g.fillRect(x + 1, 0, colW - gap, h);
       }
-      this.gridCells.push(cells);
-      gridEl.append(rowEl);
-    });
-    this.labelRows();
-    this.paintGrid();
-  }
-
-  /** The live array behind a grid row (the state object can be replaced by clear). */
-  private rowArray(ri: number): boolean[] {
-    if (ri < TONE_ROWS) return this.seq.state.tones[TONE_ROWS - 1 - ri];
-    return this.seq.state.drums[ri - TONE_ROWS];
-  }
-
-  private preview(ri: number): void {
-    if (!this.seq.state.sound) return;
-    if (ri < TONE_ROWS) this.audio.hit("tone", this.seq.rowNote(TONE_ROWS - 1 - ri), 0.7, 0);
-    else {
-      const d = DRUMS[ri - TONE_ROWS];
-      this.audio.hit(d.role, d.note, 0.8, 0);
     }
-  }
-
-  private labelRows(): void {
-    const labels = $("seq-grid").querySelectorAll<HTMLElement>(".seq-label");
-    for (let ri = 0; ri < TONE_ROWS; ri++) {
-      const note = this.seq.rowNote(TONE_ROWS - 1 - ri);
-      labels[ri].textContent = `${ROOTS[note % 12]}${Math.floor(note / 12) - 1}`;
+    // Melody: a block per note, height by pitch, held until the next note.
+    g.font = "11px system-ui, sans-serif";
+    g.textBaseline = "middle";
+    g.fillStyle = "#8b949e";
+    g.fillText("Melody", 2, melTop + melH / 2);
+    const noteH = Math.max(3, melH / (2 * half + 1));
+    for (let i = 0; i < STEPS; i++) {
+      const d = bar.melody[i];
+      if (d === null) continue;
+      let len = 1;
+      while (len < 4 && i + len < STEPS && bar.melody[i + len] === null) len++;
+      const y = melTop + ((half - d) / (2 * half)) * (melH - noteH);
+      const x = labelW + i * colW + 1;
+      g.fillStyle = "rgba(88, 166, 255, 0.25)";
+      g.fillRect(x, y, len * colW - gap, noteH);
+      g.fillStyle = i === this.seq.current ? "#a5d6ff" : "#58a6ff";
+      g.fillRect(x, y, colW - gap, noteH);
     }
-  }
-
-  private paintGrid(): void {
-    this.gridCells.forEach((cells, ri) => {
-      const arr = this.rowArray(ri);
-      cells.forEach((c, i) => c.classList.toggle("on", arr[i]));
+    // Drums: hat, snare, kick.
+    DRUMS.forEach((d, r) => {
+      const y = drumTop + r * (drumRowH + gap);
+      g.fillStyle = "#8b949e";
+      g.fillText(d.label, 2, y + drumRowH / 2);
+      for (let i = 0; i < STEPS; i++) {
+        const hit = bar.drums[r][i];
+        if (!hit.on) continue;
+        g.globalAlpha = 0.35 + 0.65 * hit.velocity;
+        g.fillStyle = i === this.seq.current ? "#ffc58a" : "#f0883e";
+        g.fillRect(labelW + i * colW + 1, y, colW - gap, drumRowH);
+      }
+      g.globalAlpha = 1;
     });
   }
 
-  private updatePlayhead(): void {
-    const step = this.seq.current;
-    if (step === this.lastStepShown) return;
-    for (const cells of this.gridCells) {
-      if (this.lastStepShown >= 0) cells[this.lastStepShown].classList.remove("now");
-      if (step >= 0) cells[step].classList.add("now");
+  private drawPad(): void {
+    const g = this.padCtx;
+    if (!g) return;
+    const size = 150, seq = this.settings.seq;
+    const grad = g.createLinearGradient(0, size, size, 0);
+    grad.addColorStop(0, "#161b22");
+    grad.addColorStop(1, "#2d2346");
+    g.fillStyle = grad;
+    g.fillRect(0, 0, size, size);
+    g.strokeStyle = "#30363d";
+    g.lineWidth = 1;
+    for (let i = 1; i < 4; i++) {
+      const p = Math.round((i * size) / 4) + 0.5;
+      g.beginPath();
+      g.moveTo(p, 0); g.lineTo(p, size);
+      g.moveTo(0, p); g.lineTo(size, p);
+      g.stroke();
     }
-    this.lastStepShown = step;
+    const x = seq.drumDensity * size, y = (1 - seq.melodyDensity) * size;
+    // The dot swells with the drums and glows with the melody.
+    const kick = this.sources.get("kick"), tone = this.sources.get("tone");
+    g.fillStyle = `rgba(210, 168, 255, ${0.15 + 0.35 * tone})`;
+    g.beginPath();
+    g.arc(x, y, 14 + 10 * kick, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = "#d2a8ff";
+    g.beginPath();
+    g.arc(x, y, 6, 0, Math.PI * 2);
+    g.fill();
   }
 
   private updateMeters(): void {

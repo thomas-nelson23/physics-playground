@@ -1,6 +1,6 @@
 # Physics Playground
 
-An interactive desktop app for exploring physics and algorithmic models on a live canvas. Pick a model, tweak its parameters with sliders, and poke at it with the mouse. Then play it like an instrument: a built-in step sequencer, a MIDI controller, or a song can drive every model through notes, macros and modulation.
+An interactive desktop app for exploring physics and algorithmic models on a live canvas. Pick a model, tweak its parameters with sliders, and poke at it with the mouse. Then play it like an instrument: a built-in generative sequencer, a MIDI controller, or a song can drive every model through notes, macros and modulation.
 
 ![Boids model](docs/screenshot.png)
 
@@ -12,22 +12,12 @@ Built with [Tauri 2](https://tauri.app) (Rust shell, native webview) and TypeScr
 | --- | --- | --- |
 | Particles & gravity | Particle physics | Drag to fling a body, Shift for a heavy one |
 | Orbits | Particle physics | Drag to launch a planet (with a trajectory preview), right-drag for a star |
-| Electric field | Particle physics | Click for + charge, right-click for -, drag to move, right-click a charge to delete |
 | Cloth | Mechanics | Drag to pull the fabric, right-drag to slice it |
-| Chaotic pendulums | Mechanics | Drag to aim, release to drop every pendulum |
-| Ripple tank | Waves & fluids | Hold for a wave source, right-drag to draw walls |
-| Ink in water | Waves & fluids | Drag to stir in dye, right-drag to stir without dye |
 | Flocking (boids) | Algorithmic | Hold to attract, right-click or Shift to scatter |
-| Game of Life | Algorithmic | Click or drag to draw cells |
 | Reaction–diffusion | Algorithmic | Drag to seed chemical, right-drag to wipe |
-| Falling sand | Algorithmic | Drag to pour sand, water, plants, fire or lava; right-drag erases |
-| Slime mould | Algorithmic | Drag to drop food, right-drag to wipe trails |
 | Chladni plate | Sound & music | Notes change the plate's vibration mode; drag to stir the sand |
-| Harmonograph | Sound & music | The interval between notes sets the pendulums' frequency ratio; click for a fresh figure |
-| String harp | Sound & music | Notes pluck the matching string; drag across strings to strum |
-| Fireflies | Sound & music | Coupled oscillators that sync up and lock to the beat; hold to draw them in |
 
-Shift works in place of right-click everywhere. Many models have preset dropdowns (slit experiments, reaction patterns, brush materials, colour schemes).
+Shift works in place of right-click everywhere. Several models have preset dropdowns (reaction patterns, colour schemes).
 
 Keyboard: `Space` play/pause the simulation, `Enter` play/stop the sequencer, `R` reset, `.` single step while paused.
 
@@ -35,12 +25,12 @@ Keyboard: `Space` play/pause the simulation, `Enter` play/stop the sequencer, `R
 
 The panel under the canvas has four tabs.
 
-- **Sequencer**: 16 steps with kick, snare and hi-hat rows and eight melody rows locked to a scale. It plays through a small built-in synth (or silently, with Sound off) and sends every hit to the current model.
+- **Sequencer**: a generative drum machine and melody. Instead of programming steps, you steer it: **Drum density** adds hits to the drum pattern (from a bare backbone up to ghost notes and rolls), **Melody density** fills the melody in with more notes, **Variation** sets how much the pattern evolves each bar and how often it plays a fill, and **Melody range** sets how far the melody wanders. The XY pad sets both densities at once with one drag. **New idea** starts a fresh pattern, **Fill** plays a fill at the end of the bar, and **Hold** freezes the pattern. Pick a drum style (broken beat, four on the floor, half-time, ambient), a scale and root, and swing. The view shows the bar that's playing. It plays through a small built-in synth (or silently, with Sound off) and sends every hit to the current model.
 - **Modulation**: routes that let a music source push a slider. Sources are note envelopes (any note, kick, snare, hat, melody), last velocity and pitch, held MIDI notes, tempo-synced LFOs, audio levels (overall, bass, mids, treble), the mod wheel, pitch bend and any MIDI CC. Targets are the model's number sliders and its macros. A coloured bar under a slider shows how far it's being pushed.
-- **MIDI**: pick input devices, play notes through the synth, and map knobs with MIDI learn (click MIDI learn, click a slider or macro, turn a knob). Macro mappings carry across models.
+- **MIDI**: pick input devices, play notes through the synth, and map knobs with MIDI learn (click MIDI learn, click a slider or macro, turn a knob). Macro and sequencer mappings carry across models, so a knob can ride the drum or melody density live.
 - **Audio file**: play a song; its levels become modulation sources and its kick drums trigger note reactions.
 
-Every model reacts to notes in its own way (notes drop bodies, pluck the cloth, fire dye jets, seed Life colonies, and so on), coloured by pitch where it has colour. Each model also has a few **macros**: single 0..1 knobs that push several parameters at once. Routes and macro settings are saved per model.
+Every model reacts to notes in its own way (notes drop bodies, pluck the cloth, seed reaction spots, retune the Chladni plate, and so on), coloured by pitch where it has colour. Each model also has a few **macros**: single 0..1 knobs that push several parameters at once. Routes and macro settings are saved per model.
 
 MIDI goes through the Rust side ([`src-tauri/src/midi.rs`](src-tauri/src/midi.rs), using `midir`) because the Linux and macOS webviews don't support Web MIDI. Messages reach the UI as `midi-message` events. On Linux that needs ALSA (`alsa-lib` on Arch, `libasound2-dev` to build on Debian/Ubuntu). In a plain browser (`npm run dev`) the app falls back to Web MIDI where the browser has it.
 
@@ -166,25 +156,15 @@ src/
     registry.ts      list of available models
     particles.ts     n-body gravity + collisions
     orbits.ts        stars and planets (leapfrog integrator)
-    charges.ts       electric field, potential and field lines
     cloth.ts         Verlet cloth with tearing
-    pendulum.ts      fan of chaotic double pendulums (RK4)
-    waves.ts         ripple tank (2D wave equation)
-    fluid.ts         stable fluids with dye
     boids.ts         flocking
-    life.ts          Conway's Game of Life
     reaction.ts      Gray-Scott reaction-diffusion
-    sand.ts          falling-sand cellular automaton
-    slime.ts         Physarum slime mould agents
     chladni.ts       Chladni figures on a vibrating plate
-    harmonograph.ts  damped pendulums drawing musical intervals
-    harp.ts          plucked strings (1D wave equation)
-    fireflies.ts     Kuramoto oscillators that sync to the beat
     lib/raster.ts    pixel buffer + palettes for grid models
     lib/music.ts     note colours and helpers for musical models
   music/
     studio.ts        music panel: sequencer UI, routes, MIDI learn, audio file
-    sequencer.ts     16-step sequencer with lookahead scheduling
+    sequencer.ts     generative drums and melody with lookahead scheduling
     audio.ts         drum kit, synth, file player, band analyser
     modulation.ts    modulation sources and how they combine with sliders and macros
     midi.ts          MIDI input (Tauri events, or Web MIDI in a browser)

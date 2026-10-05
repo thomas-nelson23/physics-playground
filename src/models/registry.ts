@@ -1,20 +1,10 @@
 import type { ModelDefinition } from "./types";
 import { particles } from "./particles";
 import { orbits } from "./orbits";
-import { charges } from "./charges";
 import { cloth } from "./cloth";
-import { pendulum } from "./pendulum";
-import { waves } from "./waves";
-import { fluid } from "./fluid";
 import { boids } from "./boids";
-import { life } from "./life";
 import { reaction } from "./reaction";
-import { sand } from "./sand";
-import { slime } from "./slime";
 import { chladni } from "./chladni";
-import { harmonograph } from "./harmonograph";
-import { harp } from "./harp";
-import { fireflies } from "./fireflies";
 
 /**
  * Every model the app offers. To add a model, create a file in this folder
@@ -22,11 +12,10 @@ import { fireflies } from "./fireflies";
  * groups by category in the order categories first appear here.
  */
 export const models: ModelDefinition[] = [
-  particles, orbits, charges,
-  cloth, pendulum,
-  waves, fluid,
-  boids, life, reaction, sand, slime,
-  chladni, harmonograph, harp, fireflies,
+  particles, orbits,
+  cloth,
+  boids, reaction,
+  chladni,
 ];
 
 export function findModel(id: string): ModelDefinition | undefined {
