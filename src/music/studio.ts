@@ -5,7 +5,10 @@ import { AudioEngine, BeatDetector, type Waveform } from "./audio";
 import { dispatchMidi, openMidi, type MidiInputs } from "./midi";
 import { applyModulation, macroSpecs, modulatable, ModSources, SOURCES, sourceLabel, type NumberSpec } from "./modulation";
 import { GLOBAL_SPECS, applyGlobals, canvasFilter, defaultGlobals, sanitizeGlobals } from "./globals";
-import { DRUMS, ROOTS, SCALES, STEPS, STYLES, Sequencer, sanitizeState, type SequencerState } from "./sequencer";
+import {
+  BASS_STYLES, CHORD_SPEED_LABELS, CHORD_STYLES, DRUMS, MELODY_STYLES, ROOTS, SCALES, STEPS, STYLES,
+  Sequencer, applyStyleDensities, chordName, sanitizeState, type SequencerState,
+} from "./sequencer";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -40,26 +43,80 @@ interface ModelSettings {
   muted: ReactionSource[];
 }
 
-/** The generator's live controls, shown as sliders and mappable with MIDI learn. */
-const GEN_SPECS: ParamSpec[] = [
-  { kind: "number", key: "drumDensity", label: "Drum density", min: 0, max: 1, step: 0.01, default: 0.5,
-    description: "How many drum hits play. Low keeps the backbone; high fills in ghost notes and rolls." },
-  { kind: "number", key: "melodyDensity", label: "Melody density", min: 0, max: 1, step: 0.01, default: 0.45,
-    description: "How many melody notes play. Low leaves long held notes; high fills in runs between them." },
-  { kind: "number", key: "variation", label: "Variation", min: 0, max: 1, step: 0.01, default: 0.35,
-    description: "How much the pattern changes each bar, and how often it plays a fill." },
-  { kind: "number", key: "range", label: "Melody range", min: 2, max: 16, step: 1, default: 8,
-    description: "How many scale notes the melody wanders across." },
+const pct = (v: number) => `${Math.round(v * 100)}%`;
+const choices = (rec: Record<string, { label: string }>) => Object.entries(rec).map(([value, o]) => ({ value, label: o.label }));
+const BASS_RANGE_LABELS = ["Root only", "+ octave", "+ fifth", "+ third", "+ low fifth", "+ seventh", "+ passing"];
+/** Drum ring radii as a share of the canvas radius, kick innermost. */
+const RING_RADII = [0.4, 0.68, 0.94];
+
+function drumSpecs(key: string, max: number): ParamSpec[] {
+  return [
+    { kind: "number", key: `${key}Density`, label: "Density", min: 0, max: 1, step: 0.01, default: 0.3,
+      format: (v) => `${v <= 0 ? 0 : Math.max(1, Math.round(v * max))} hits`,
+      description: "How many hits the ring spreads evenly round the bar." },
+    { kind: "number", key: `${key}Variation`, label: "Variation", min: 0, max: 1, step: 0.01, default: 0.3, format: pct,
+      description: "How much each bar strays: ghost notes, dropped hits and nudges." },
+  ];
+}
+
+/**
+ * The sequencer's controls, by part. They're drawn as sliders and dropdowns,
+ * and can be mapped to a MIDI knob (as `gen#<key>`).
+ */
+const PARTS: { part: string; specs: ParamSpec[] }[] = [
+  { part: "Global", specs: [
+    { kind: "number", key: "tempo", label: "Tempo", min: 40, max: 240, step: 1, default: 112, format: (v) => `${v} BPM` },
+    { kind: "number", key: "swing", label: "Swing", min: 0, max: 0.8, step: 0.05, default: 0, format: pct,
+      description: "Delays every second sixteenth for a shuffled feel." },
+  ] },
+  ...DRUMS.map((d) => ({ part: d.label, specs: drumSpecs(d.key, d.max) })),
+  { part: "Bass", specs: [
+    { kind: "choice", key: "bassStyle", label: "Style", options: choices(BASS_STYLES), default: "pulse" },
+    { kind: "number", key: "bassDensity", label: "Density", min: 0, max: 1, step: 0.01, default: 0.4, format: pct,
+      description: "How many notes the bass plays." },
+    { kind: "number", key: "bassRange", label: "Range", min: 1, max: 7, step: 1, default: 3, format: (v) => BASS_RANGE_LABELS[v - 1] ?? String(v),
+      description: "Which notes it may leave the root for: octave, fifth, chord tones, then passing notes." },
+    { kind: "number", key: "bassVariation", label: "Variation", min: 0, max: 1, step: 0.01, default: 0.3, format: pct,
+      description: "How much the bass line changes from bar to bar." },
+  ] },
+  { part: "Chords", specs: [
+    { kind: "choice", key: "chordStyle", label: "Style", options: choices(CHORD_STYLES), default: "pop" },
+    { kind: "number", key: "chordSpeed", label: "Change every", min: 0, max: CHORD_SPEED_LABELS.length - 1, step: 1, default: 2,
+      format: (v) => CHORD_SPEED_LABELS[v] ?? String(v), description: "How long each chord lasts." },
+    { kind: "number", key: "chordVariation", label: "Variation", min: 0, max: 1, step: 0.01, default: 0.3, format: pct,
+      description: "How often the progression switches and chords are swapped for substitutes typical of the style." },
+    { kind: "number", key: "chordDensity", label: "Rhythm density", min: 0, max: 1, step: 0.01, default: 0.3, format: pct,
+      description: "Low holds each chord; high plays it in a busy rhythm." },
+    { kind: "number", key: "chordRhythm", label: "Rhythm variation", min: 0, max: 1, step: 0.01, default: 0.25, format: pct,
+      description: "How much the chord rhythm changes from bar to bar." },
+  ] },
+  { part: "Melody", specs: [
+    { kind: "choice", key: "melodyStyle", label: "Style", options: choices(MELODY_STYLES), default: "wander" },
+    { kind: "number", key: "melodyRange", label: "Range", min: 2, max: 16, step: 1, default: 8, format: (v) => `${v} notes`,
+      description: "How many scale notes the melody moves across." },
+    { kind: "number", key: "melodyDensity", label: "Density", min: 0, max: 1, step: 0.01, default: 0.4, format: pct,
+      description: "How many melody notes play." },
+    { kind: "number", key: "melodyGroove", label: "Groove", min: 0, max: 1, step: 0.01, default: 0.3, format: pct,
+      description: "Adds rhythm: syncopated, clipped notes, and the second half-bar answers the first." },
+  ] },
 ];
 
+function findSeqSpec(key: string): { part: string; spec: ParamSpec } | null {
+  for (const p of PARTS) {
+    const spec = p.specs.find((x) => x.key === key);
+    if (spec) return { part: p.part, spec };
+  }
+  return null;
+}
+
 const REACTION_LABELS: Record<ReactionSource, string> = {
-  kick: "Kick", snare: "Snare", hat: "Hi-hat", tone: "Melody notes",
+  kick: "Kick", snare: "Snare", hat: "Hi-hat", tone: "Melody notes", bassline: "Bass notes", chord: "Chords",
   level: "Sound level", bass: "Bass", mid: "Mids", treble: "Treble", spectrum: "Spectrum", beat: "Beat",
 };
 
 /** The modulation source whose live value the matrix shows next to each reaction. */
 const REACTION_METERS: Record<ReactionSource, string> = {
-  kick: "kick", snare: "snare", hat: "hat", tone: "tone",
+  kick: "kick", snare: "snare", hat: "hat", tone: "tone", bassline: "bassline", chord: "chord",
   level: "level", bass: "bass", mid: "mid", treble: "treble", spectrum: "level", beat: "lfoBeat",
 };
 
@@ -115,11 +172,13 @@ export class Studio {
   private learning = false;
   private learnTarget: string | null = null;
   private ledTimer = 0;
-  private genControls: ParamControls | null = null;
-  private padCtx: CanvasRenderingContext2D | null = null;
-  private viewCtx: CanvasRenderingContext2D | null = null;
-  /** Version and playhead the pattern view last drew, to skip redundant redraws. */
-  private viewDrawn = "";
+  private seqControls: ParamControls[] = [];
+  private ringCtx: CanvasRenderingContext2D | null = null;
+  private melodyCtx: CanvasRenderingContext2D | null = null;
+  /** What the melody view and chord chips last drew, to skip redundant redraws. */
+  private melodyDrawn = "";
+  private chipsDrawn = "";
+  private leds: { el: HTMLElement; level: () => number }[] = [];
   private meterBars: Record<string, HTMLElement> = {};
   /** Live source bars in the matrix, refreshed while the Modulation tab is open. */
   private sourceMeters: { bar: HTMLElement; source: () => string }[] = [];
@@ -130,6 +189,7 @@ export class Studio {
   private feed: MusicFrame = { ...SILENT_MUSIC, spectrum: new Float32Array(SILENT_MUSIC.spectrum.length), wave: new Float32Array(SILENT_MUSIC.wave.length) };
   private beatsNow = 0;
   private lastTone = { hue: 210, pitch: 0.5 };
+  private chordHue = 210;
 
   constructor() {
     const saved = load<Partial<GlobalSettings>>("music:global") ?? {};
@@ -222,10 +282,11 @@ export class Studio {
     for (const ev of events) {
       this.sources.trigger(ev);
       if (ev.role === "tone") this.lastTone = { hue: noteHue(ev.note), pitch: ev.x };
+      if (ev.role === "chord") this.chordHue = noteHue(this.seq.key + this.seq.chord.root);
     }
     this.beatsNow = this.seq.beats(nowSeconds);
     this.sources.update(dt, this.beatsNow, bands);
-    this.drawView();
+    this.drawSequencer();
     this.updateMeters();
     return events;
   }
@@ -249,6 +310,8 @@ export class Studio {
     f.snare = val("snare", src.get("snare"));
     f.hat = val("hat", src.get("hat"));
     f.tone = val("tone", src.get("tone"));
+    f.bassline = val("bassline", src.get("bassline"));
+    f.chord = val("chord", src.get("chord"));
     f.level = val("level", src.get("level"));
     f.bass = val("bass", src.get("bass"));
     f.mid = val("mid", src.get("mid"));
@@ -262,7 +325,8 @@ export class Studio {
     f.pulse = this.seq.playing ? val("beat", (1 - phase) ** 3) : 0;
     f.hue = this.lastTone.hue;
     f.pitch = this.lastTone.pitch;
-    f.energy = Math.max(f.level, f.kick * 0.7 + f.snare * 0.45 + f.tone * 0.35 + f.hat * 0.15);
+    f.chordHue = this.chordHue;
+    f.energy = Math.max(f.level, f.kick * 0.7 + f.snare * 0.45 + f.tone * 0.35 + f.bassline * 0.3 + f.chord * 0.25 + f.hat * 0.15);
     return f;
   }
 
@@ -437,8 +501,8 @@ export class Studio {
     document.body.classList.toggle("learning", on);
     document.querySelectorAll(".param.learn-target").forEach((e) => e.classList.remove("learn-target"));
     $("midi-learn-help").textContent = on
-      ? "Now click a slider in the sidebar, a macro or global control, or a sequencer slider, then move a knob on your controller."
-      : "Click MIDI learn, click a slider, macro or global control, then move a knob on your controller. Sequencer sliders can be mapped too.";
+      ? "Now click a slider in the sidebar, a macro or global control, or a sequencer control, then move a knob on your controller."
+      : "Click MIDI learn, click a slider, macro or global control, then move a knob on your controller. Sequencer controls can be mapped too.";
   }
 
   /** Translate a sidebar row's data-target into a binding target. */
@@ -455,8 +519,8 @@ export class Studio {
 
   private bindingLabel(target: string): string | null {
     if (target.startsWith("gen#")) {
-      const spec = GEN_SPECS.find((p) => p.key === target.slice(4));
-      return spec ? `Sequencer: ${spec.label}` : null;
+      const found = findSeqSpec(target.slice(4));
+      return found ? `Sequencer: ${found.part} ${found.spec.label.toLowerCase()}` : null;
     }
     if (target.startsWith("glob#")) {
       const spec = GLOBAL_SPECS.find((p) => p.key === target.slice(5));
@@ -510,59 +574,8 @@ export class Studio {
     $("dock-toggle").addEventListener("click", () => this.setDockHidden(!$("dock").classList.contains("collapsed")));
     this.setDockHidden(s.dockHidden);
 
-    // Transport
-    const play = $<HTMLButtonElement>("seq-play");
-    play.addEventListener("click", () => this.toggleSequencer());
-    const tempo = $<HTMLInputElement>("seq-tempo");
-    tempo.value = String(s.seq.tempo);
-    tempo.addEventListener("change", () => {
-      s.seq.tempo = Math.min(240, Math.max(40, Number(tempo.value) || 120));
-      tempo.value = String(s.seq.tempo);
-      this.saveGlobal();
-    });
-
-    // Sequencer settings
-    const style = $<HTMLSelectElement>("seq-style");
-    for (const [id, st] of Object.entries(STYLES)) style.append(el("option", { value: id, textContent: st.label }));
-    style.value = s.seq.style;
-    style.addEventListener("change", () => { s.seq.style = style.value; this.seq.version++; this.saveGlobal(); style.blur(); });
-    const scale = $<HTMLSelectElement>("seq-scale");
-    for (const [id, sc] of Object.entries(SCALES)) scale.append(el("option", { value: id, textContent: sc.label }));
-    scale.value = s.seq.scale;
-    scale.addEventListener("change", () => { s.seq.scale = scale.value; this.saveGlobal(); scale.blur(); });
-    const root = $<HTMLSelectElement>("seq-root");
-    ROOTS.forEach((r, i) => root.append(el("option", { value: String(i), textContent: r })));
-    root.value = String(s.seq.root);
-    root.addEventListener("change", () => { s.seq.root = Number(root.value); this.saveGlobal(); root.blur(); });
-    const wave = $<HTMLSelectElement>("seq-wave");
-    wave.addEventListener("change", () => { this.audio.waveform = wave.value as Waveform; wave.blur(); });
-    const swing = $<HTMLInputElement>("seq-swing");
-    swing.value = String(s.seq.swing);
-    swing.addEventListener("input", () => { s.seq.swing = Number(swing.value); this.saveGlobal(); });
-    const volume = $<HTMLInputElement>("seq-volume");
-    volume.value = String(s.volume);
-    volume.addEventListener("input", () => { s.volume = Number(volume.value); this.audio.setVolume(s.volume); this.saveGlobal(); });
-    const sound = $<HTMLInputElement>("seq-sound");
-    sound.checked = s.seq.sound;
-    sound.addEventListener("change", () => { s.seq.sound = sound.checked; this.saveGlobal(); });
-
-    // Generator
-    this.genControls = renderParamControls($("gen-sliders"), GEN_SPECS, s.seq as unknown as ParamValues, () => this.saveGlobal(), "gen:");
-    // The panel is short, so descriptions show as tooltips here instead of under each slider.
-    for (const row of $("gen-sliders").querySelectorAll<HTMLElement>(".param[data-target]")) {
-      row.title = GEN_SPECS.find((p) => `gen:${p.key}` === row.dataset.target)?.description ?? "";
-    }
-    $("gen-new").addEventListener("click", () => { this.seq.newIdea(); this.saveGlobal(); });
-    $("gen-fill").addEventListener("click", () => this.seq.fill());
-    const hold = $<HTMLButtonElement>("gen-hold");
-    hold.classList.toggle("active", s.seq.hold);
-    hold.addEventListener("click", () => {
-      s.seq.hold = !s.seq.hold;
-      hold.classList.toggle("active", s.seq.hold);
-      this.saveGlobal();
-    });
-    this.buildPad();
-    this.viewCtx = $<HTMLCanvasElement>("gen-view").getContext("2d");
+    $<HTMLButtonElement>("seq-play").addEventListener("click", () => this.toggleSequencer());
+    this.buildSequencer();
 
     // Global controls and macros
     this.renderGlobals();
@@ -640,7 +653,7 @@ export class Studio {
       this.learnTarget = target;
     };
     $("sidebar").addEventListener("pointerdown", pickTarget);
-    $("gen-sliders").addEventListener("pointerdown", pickTarget);
+    document.querySelector<HTMLElement>('#dock-body .tab[data-tab="sequencer"]')?.addEventListener("pointerdown", pickTarget);
     $("global-controls").addEventListener("pointerdown", pickTarget);
     $("macros").addEventListener("pointerdown", pickTarget);
 
@@ -698,146 +711,333 @@ export class Studio {
     play.classList.toggle("playing", this.seq.playing);
   }
 
-  /** Set a generator control from a 0..1 knob position (MIDI CC). */
+  // ---- Sequencer panel ---------------------------------------------------------
+
+  /** Build the Global, Drums, Bass, Chords and Melody sections. */
+  private buildSequencer(): void {
+    const s = this.settings;
+    const seq = s.seq;
+    const values = seq as unknown as ParamValues;
+    const changed = (spec: ParamSpec) => {
+      if (spec.key === "chordStyle") this.seq.refreshHarmony();
+      this.seq.version++;
+      this.saveGlobal();
+    };
+    const render = (box: HTMLElement, specs: ParamSpec[]) => {
+      const c = renderParamControls(box, specs, values, changed, "gen:");
+      this.seqControls.push(c);
+      // The panel is short, so descriptions show as tooltips instead of under each control.
+      for (const row of box.querySelectorAll<HTMLElement>(".param[data-target]")) {
+        row.title = specs.find((p) => `gen:${p.key}` === row.dataset.target)?.description ?? "";
+      }
+    };
+    const specsOf = (part: string) => PARTS.find((p) => p.part === part)!.specs;
+
+    // Global
+    const style = $<HTMLSelectElement>("seq-style");
+    for (const [id, st] of Object.entries(STYLES)) style.append(el("option", { value: id, textContent: st.label }));
+    style.value = seq.style;
+    style.addEventListener("change", () => {
+      seq.style = style.value;
+      applyStyleDensities(seq);
+      this.refreshSeqControls();
+      this.seq.version++;
+      this.saveGlobal();
+      style.blur();
+    });
+    const scale = $<HTMLSelectElement>("seq-scale");
+    for (const [id, sc] of Object.entries(SCALES)) scale.append(el("option", { value: id, textContent: sc.label }));
+    scale.value = seq.scale;
+    scale.addEventListener("change", () => { seq.scale = scale.value; this.seq.refreshHarmony(); this.saveGlobal(); scale.blur(); });
+    const root = $<HTMLSelectElement>("seq-root");
+    ROOTS.forEach((r, i) => root.append(el("option", { value: String(i), textContent: r })));
+    root.value = String(seq.root);
+    root.addEventListener("change", () => { seq.root = Number(root.value); this.seq.version++; this.saveGlobal(); root.blur(); });
+    const wave = $<HTMLSelectElement>("seq-wave");
+    wave.addEventListener("change", () => { this.audio.waveform = wave.value as Waveform; wave.blur(); });
+    render($("global-sliders"), specsOf("Global"));
+    const volume = $<HTMLInputElement>("seq-volume");
+    volume.value = String(s.volume);
+    volume.addEventListener("input", () => { s.volume = Number(volume.value); this.audio.setVolume(s.volume); this.saveGlobal(); });
+    const sound = $<HTMLInputElement>("seq-sound");
+    sound.checked = seq.sound;
+    sound.addEventListener("change", () => { seq.sound = sound.checked; this.saveGlobal(); });
+    $("gen-new").addEventListener("click", () => { this.seq.newIdea(); this.saveGlobal(); });
+    $("gen-fill").addEventListener("click", () => this.seq.fill());
+    const hold = $<HTMLButtonElement>("gen-hold");
+    hold.classList.toggle("active", seq.hold);
+    hold.addEventListener("click", () => {
+      seq.hold = !seq.hold;
+      hold.classList.toggle("active", seq.hold);
+      this.saveGlobal();
+    });
+
+    // Parts on and off, with a light that flashes as each one plays.
+    const parts: [string, "drumsOn" | "bassOn" | "chordsOn" | "melodyOn", () => number][] = [
+      ["drums", "drumsOn", () => Math.max(this.sources.get("kick"), this.sources.get("snare"), this.sources.get("hat"))],
+      ["bass", "bassOn", () => this.sources.get("bassline")],
+      ["chords", "chordsOn", () => this.sources.get("chord")],
+      ["melody", "melodyOn", () => this.sources.get("tone")],
+    ];
+    for (const [id, key, level] of parts) {
+      const box = $<HTMLInputElement>(`part-${id}`);
+      const section = box.closest(".seq-part")!;
+      box.checked = seq[key];
+      section.classList.toggle("off", !seq[key]);
+      box.addEventListener("change", () => {
+        seq[key] = box.checked;
+        section.classList.toggle("off", !box.checked);
+        this.seq.version++;
+        this.saveGlobal();
+      });
+      this.leds.push({ el: $(`led-${id}`), level });
+    }
+
+    // Drums: one row per track beside the rings.
+    const tracks = $("drum-tracks");
+    for (const d of DRUMS) {
+      const sliders = el("div", { className: "drum-sliders" });
+      const name = el("div", { className: "drum-name", textContent: d.label });
+      name.style.color = d.colour;
+      tracks.append(el("div", { className: "drum-track" }, name, sliders));
+      render(sliders, specsOf(d.label));
+    }
+    this.buildRing();
+
+    render($("bass-controls"), specsOf("Bass"));
+    render($("chord-controls"), specsOf("Chords"));
+    render($("melody-controls"), specsOf("Melody"));
+    this.melodyCtx = $<HTMLCanvasElement>("melody-view").getContext("2d");
+  }
+
+  private refreshSeqControls(): void {
+    for (const c of this.seqControls) c.refresh();
+  }
+
+  /** Set a sequencer control from a 0..1 knob position (MIDI CC). */
   private setGen(key: string, v: number): void {
-    const spec = GEN_SPECS.find((p) => p.key === key);
-    if (!spec || spec.kind !== "number") return;
-    const value = Math.round((spec.min + v * (spec.max - spec.min)) / spec.step) * spec.step;
-    (this.settings.seq as unknown as Record<string, number>)[key] = Math.min(spec.max, Math.max(spec.min, value));
-    this.genControls?.refresh();
+    const found = findSeqSpec(key);
+    if (!found) return;
+    const spec = found.spec;
+    const values = this.settings.seq as unknown as ParamValues;
+    if (spec.kind === "number") {
+      const value = Math.round((spec.min + v * (spec.max - spec.min)) / spec.step) * spec.step;
+      values[key] = Math.min(spec.max, Math.max(spec.min, value));
+    } else if (spec.kind === "choice") {
+      const next = spec.options[Math.min(spec.options.length - 1, Math.floor(v * spec.options.length))].value;
+      if (next === values[key]) return;
+      values[key] = next;
+      if (key === "chordStyle") this.seq.refreshHarmony();
+    } else return;
+    this.seq.version++;
+    this.refreshSeqControls();
     this.saveGlobal();
   }
 
-  /** The XY pad: left-right is drum density, bottom-top is melody density. */
-  private buildPad(): void {
-    const pad = $<HTMLCanvasElement>("gen-pad");
+  private ringSize = 176;
+
+  /** The drum rings: drag one round to turn its pattern, double-click to put it back. */
+  private buildRing(): void {
+    const ring = $<HTMLCanvasElement>("drum-ring");
     const dpr = window.devicePixelRatio || 1;
-    pad.width = pad.height = Math.round(150 * dpr);
-    this.padCtx = pad.getContext("2d");
-    this.padCtx?.scale(dpr, dpr);
-    let dragging = false;
-    const set = (e: PointerEvent) => {
-      const r = pad.getBoundingClientRect();
-      const clamp = (x: number) => Math.round(Math.min(1, Math.max(0, x)) * 100) / 100;
-      this.settings.seq.drumDensity = clamp((e.clientX - r.left) / r.width);
-      this.settings.seq.melodyDensity = clamp(1 - (e.clientY - r.top) / r.height);
-      this.genControls?.refresh();
+    ring.width = ring.height = Math.round(this.ringSize * dpr);
+    this.ringCtx = ring.getContext("2d");
+    this.ringCtx?.scale(dpr, dpr);
+    const seq = this.settings.seq as unknown as Record<string, number>;
+    const at = (e: MouseEvent) => {
+      const r = ring.getBoundingClientRect();
+      const dx = e.clientX - r.left - r.width / 2, dy = e.clientY - r.top - r.height / 2;
+      const radius = Math.hypot(dx, dy) / (r.width / 2);
+      // Nearest ring, inner (kick) to outer (hat).
+      let track = 0;
+      RING_RADII.forEach((rr, i) => { if (Math.abs(rr - radius) < Math.abs(RING_RADII[track] - radius)) track = i; });
+      return { track, angle: Math.atan2(dy, dx) };
     };
-    pad.addEventListener("pointerdown", (e) => {
-      dragging = true;
-      pad.setPointerCapture(e.pointerId);
-      set(e);
+    let drag: { key: string; angle: number; rotate: number } | null = null;
+    ring.addEventListener("pointerdown", (e) => {
+      const { track, angle } = at(e);
+      const key = `${DRUMS[track].key}Rotate`;
+      drag = { key, angle, rotate: seq[key] };
+      ring.setPointerCapture(e.pointerId);
     });
-    pad.addEventListener("pointermove", (e) => dragging && set(e));
+    ring.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      let delta = at(e).angle - drag.angle;
+      delta = Math.atan2(Math.sin(delta), Math.cos(delta));
+      const next = (((drag.rotate + Math.round((delta / (Math.PI * 2)) * STEPS)) % STEPS) + STEPS) % STEPS;
+      if (next !== seq[drag.key]) {
+        seq[drag.key] = next;
+        this.seq.version++;
+      }
+    });
     const end = () => {
-      if (!dragging) return;
-      dragging = false;
+      if (!drag) return;
+      drag = null;
       this.saveGlobal();
     };
-    pad.addEventListener("pointerup", end);
-    pad.addEventListener("pointercancel", end);
+    ring.addEventListener("pointerup", end);
+    ring.addEventListener("pointercancel", end);
+    ring.addEventListener("dblclick", (e) => {
+      seq[`${DRUMS[at(e).track].key}Rotate`] = 0;
+      this.seq.version++;
+      this.saveGlobal();
+    });
   }
 
-  /** Redraw the pad and the bar view while the Sequencer tab is open. */
-  private drawView(): void {
-    const canvas = this.viewCtx?.canvas;
+  /** Redraw the sequencer's views while its tab is open. */
+  private drawSequencer(): void {
+    const canvas = this.ringCtx?.canvas;
     if (!canvas || canvas.offsetParent === null || $("dock").classList.contains("collapsed")) return;
-    this.drawPad();
+    for (const l of this.leds) l.el.style.opacity = String(0.15 + 0.85 * Math.min(1, l.level()));
+    this.drawRing();
+    this.drawMelody();
+    this.drawChords();
+  }
+
+  private drawRing(): void {
+    const g = this.ringCtx!;
+    const size = this.ringSize, c = size / 2, R = size / 2 - 8;
+    const seq = this.settings.seq;
+    g.clearRect(0, 0, size, size);
+    const angle = (step: number) => -Math.PI / 2 + (step / STEPS) * Math.PI * 2;
+    const playing = this.seq.playing && this.seq.current >= 0;
+    // Beat ticks and the playhead.
+    g.strokeStyle = "#30363d";
+    g.lineWidth = 1;
+    for (let i = 0; i < STEPS; i += 4) {
+      const a = angle(i);
+      g.beginPath();
+      g.moveTo(c + Math.cos(a) * R * 0.2, c + Math.sin(a) * R * 0.2);
+      g.lineTo(c + Math.cos(a) * (R + 6), c + Math.sin(a) * (R + 6));
+      g.stroke();
+    }
+    if (playing) {
+      const a = angle(this.seq.current);
+      g.strokeStyle = "rgba(230, 237, 243, 0.35)";
+      g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(c, c);
+      g.lineTo(c + Math.cos(a) * (R + 6), c + Math.sin(a) * (R + 6));
+      g.stroke();
+    }
+    DRUMS.forEach((d, i) => {
+      const r = RING_RADII[i] * R;
+      const on = seq.drumsOn;
+      g.globalAlpha = on ? 1 : 0.35;
+      g.strokeStyle = "#30363d";
+      g.lineWidth = 1;
+      g.beginPath();
+      g.arc(c, c, r, 0, Math.PI * 2);
+      g.stroke();
+      // The euclidean shape: a polygon through the pattern's hits.
+      const base = this.seq.basePattern(i);
+      const pts = base.map((hit, k) => (hit ? k : -1)).filter((k) => k >= 0);
+      if (pts.length > 1) {
+        g.strokeStyle = d.colour;
+        g.globalAlpha = on ? 0.3 : 0.1;
+        g.beginPath();
+        pts.forEach((k, j) => {
+          const x = c + Math.cos(angle(k)) * r, y = c + Math.sin(angle(k)) * r;
+          if (j === 0) g.moveTo(x, y);
+          else g.lineTo(x, y);
+        });
+        g.closePath();
+        g.stroke();
+      }
+      const env = this.sources.get(d.role);
+      for (let k = 0; k < STEPS; k++) {
+        const hit = this.seq.drumHit(i, k);
+        const x = c + Math.cos(angle(k)) * r, y = c + Math.sin(angle(k)) * r;
+        g.globalAlpha = on ? 1 : 0.35;
+        if (!hit.on) {
+          g.fillStyle = "#30363d";
+          g.beginPath();
+          g.arc(x, y, 2, 0, Math.PI * 2);
+          g.fill();
+          continue;
+        }
+        const now = playing && k === this.seq.current;
+        const rad = 2.5 + 2.5 * hit.velocity + (now ? 3 * env : 0);
+        if (hit.kind === "ghost") {
+          g.strokeStyle = d.colour;
+          g.lineWidth = 1.5;
+          g.beginPath();
+          g.arc(x, y, rad, 0, Math.PI * 2);
+          g.stroke();
+        } else {
+          g.fillStyle = hit.kind === "fill" ? "#d2a8ff" : d.colour;
+          if (!now) g.globalAlpha *= 0.55 + 0.45 * hit.velocity;
+          g.beginPath();
+          g.arc(x, y, rad, 0, Math.PI * 2);
+          g.fill();
+        }
+      }
+    });
+    g.globalAlpha = 1;
+    if (this.seq.fillPending) {
+      g.fillStyle = "#d2a8ff";
+      g.font = "11px system-ui, sans-serif";
+      g.textAlign = "center";
+      g.textBaseline = "middle";
+      g.fillText("fill", c, c);
+    }
+  }
+
+  /** The melody of the bar as a line of glowing notes, high notes higher. */
+  private drawMelody(): void {
+    const g = this.melodyCtx;
+    if (!g) return;
+    const canvas = g.canvas;
     const seq = this.settings.seq;
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth, h = canvas.clientHeight;
-    const key = [this.seq.version, this.seq.current, seq.drumDensity, seq.melodyDensity, seq.range, seq.style, w, h, dpr].join("|");
-    if (key === this.viewDrawn) return;
-    this.viewDrawn = key;
+    const key = [this.seq.version, this.seq.current, this.seq.chordIndex, seq.melodyDensity, seq.melodyRange, seq.melodyGroove, seq.melodyStyle, seq.melodyOn, seq.scale, seq.root, w, h, dpr].join("|");
+    if (key === this.melodyDrawn) return;
+    this.melodyDrawn = key;
     if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
       canvas.width = Math.round(w * dpr);
       canvas.height = Math.round(h * dpr);
     }
-    const g = this.viewCtx!;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g.fillStyle = "#0d1117";
-    g.fillRect(0, 0, w, h);
-    const bar = this.seq.view();
-    const labelW = 40, gap = 2;
-    const colW = (w - labelW) / STEPS;
-    const drumRowH = 14;
-    const drumTop = h - DRUMS.length * (drumRowH + gap);
-    const melTop = 4, melH = drumTop - 10 - melTop;
-    const half = Math.max(1, Math.floor(seq.range / 2));
-
-    // Beat columns and playhead.
-    for (let i = 0; i < STEPS; i++) {
-      const x = labelW + i * colW;
-      g.fillStyle = i === this.seq.current ? "#30363d" : i % 4 === 0 ? "#1c2128" : "#161b22";
-      g.fillRect(x + 1, 0, colW - gap, h);
-      if (bar.fill && i >= 12) {
-        g.fillStyle = "rgba(210, 168, 255, 0.08)";
-        g.fillRect(x + 1, 0, colW - gap, h);
-      }
+    g.clearRect(0, 0, w, h);
+    const col = w / STEPS, pad = 5;
+    const y = (x: number) => pad + (1 - x) * (h - pad * 2);
+    if (this.seq.playing && this.seq.current >= 0) {
+      g.fillStyle = "rgba(230, 237, 243, 0.08)";
+      g.fillRect(this.seq.current * col, 0, col, h);
     }
-    // Melody: a block per note, height by pitch, held until the next note.
-    g.font = "11px system-ui, sans-serif";
-    g.textBaseline = "middle";
-    g.fillStyle = "#8b949e";
-    g.fillText("Melody", 2, melTop + melH / 2);
-    const noteH = Math.max(3, melH / (2 * half + 1));
-    for (let i = 0; i < STEPS; i++) {
-      const d = bar.melody[i];
-      if (d === null) continue;
-      let len = 1;
-      while (len < 4 && i + len < STEPS && bar.melody[i + len] === null) len++;
-      const y = melTop + ((half - d) / (2 * half)) * (melH - noteH);
-      const x = labelW + i * colW + 1;
-      g.fillStyle = "rgba(88, 166, 255, 0.25)";
-      g.fillRect(x, y, len * colW - gap, noteH);
-      g.fillStyle = i === this.seq.current ? "#a5d6ff" : "#58a6ff";
-      g.fillRect(x, y, colW - gap, noteH);
-    }
-    // Drums: hat, snare, kick.
-    DRUMS.forEach((d, r) => {
-      const y = drumTop + r * (drumRowH + gap);
-      g.fillStyle = "#8b949e";
-      g.fillText(d.label, 2, y + drumRowH / 2);
-      for (let i = 0; i < STEPS; i++) {
-        const hit = bar.drums[r][i];
-        if (!hit.on) continue;
-        g.globalAlpha = 0.35 + 0.65 * hit.velocity;
-        g.fillStyle = i === this.seq.current ? "#ffc58a" : "#f0883e";
-        g.fillRect(labelW + i * colW + 1, y, colW - gap, drumRowH);
-      }
-      g.globalAlpha = 1;
+    const notes = this.seq.melodyBar();
+    g.strokeStyle = "rgba(88, 166, 255, 0.35)";
+    g.lineWidth = 1.5;
+    g.beginPath();
+    notes.forEach((n, i) => {
+      const x = (n.step + 0.5) * col;
+      if (i === 0) g.moveTo(x, y(n.x));
+      else g.lineTo(x, y(n.x));
     });
+    g.stroke();
+    for (const n of notes) {
+      const x = (n.step + 0.5) * col;
+      g.fillStyle = "rgba(88, 166, 255, 0.18)";
+      g.fillRect(x, y(n.x) - 1.5, Math.max(0, (n.length - 0.5) * col), 3);
+      g.fillStyle = n.step === this.seq.current ? "#a5d6ff" : "#58a6ff";
+      g.beginPath();
+      g.arc(x, y(n.x), 2 + 2.5 * n.velocity, 0, Math.PI * 2);
+      g.fill();
+    }
   }
 
-  private drawPad(): void {
-    const g = this.padCtx;
-    if (!g) return;
-    const size = 150, seq = this.settings.seq;
-    const grad = g.createLinearGradient(0, size, size, 0);
-    grad.addColorStop(0, "#161b22");
-    grad.addColorStop(1, "#2d2346");
-    g.fillStyle = grad;
-    g.fillRect(0, 0, size, size);
-    g.strokeStyle = "#30363d";
-    g.lineWidth = 1;
-    for (let i = 1; i < 4; i++) {
-      const p = Math.round((i * size) / 4) + 0.5;
-      g.beginPath();
-      g.moveTo(p, 0); g.lineTo(p, size);
-      g.moveTo(0, p); g.lineTo(size, p);
-      g.stroke();
-    }
-    const x = seq.drumDensity * size, y = (1 - seq.melodyDensity) * size;
-    // The dot swells with the drums and glows with the melody.
-    const kick = this.sources.get("kick"), tone = this.sources.get("tone");
-    g.fillStyle = `rgba(210, 168, 255, ${0.15 + 0.35 * tone})`;
-    g.beginPath();
-    g.arc(x, y, 14 + 10 * kick, 0, Math.PI * 2);
-    g.fill();
-    g.fillStyle = "#d2a8ff";
-    g.beginPath();
-    g.arc(x, y, 6, 0, Math.PI * 2);
-    g.fill();
+  /** The progression as chips, with the sounding chord lit. */
+  private drawChords(): void {
+    const seq = this.seq;
+    const key = [seq.version, seq.chordIndex, seq.key, seq.cycle.map((c) => c.root + ":" + c.tones.join(",")).join(" ")].join("|");
+    if (key === this.chipsDrawn) return;
+    this.chipsDrawn = key;
+    const box = $("chord-chips");
+    box.replaceChildren(
+      ...seq.cycle.map((c, i) => el("span", { className: `chip${i === seq.chordIndex ? " current" : ""}`, textContent: chordName(c, seq.key), title: c.numeral })),
+    );
+    if (seq.lift) box.append(el("span", { className: "chip lift", textContent: `+${seq.lift}`, title: "Epic has lifted the key for this pass" }));
   }
 
   private updateMeters(): void {

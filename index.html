@@ -46,39 +46,70 @@
             <button type="button" data-tab="audio">Audio file</button>
             <span class="spacer"></span>
             <button type="button" id="seq-play" class="primary">Play</button>
-            <label class="inline">Tempo <input id="seq-tempo" type="number" min="40" max="240" step="1" /> BPM</label>
             <span id="midi-led" class="led" title="MIDI activity"></span>
             <button type="button" id="dock-toggle" title="Hide the music panel">Hide</button>
           </nav>
           <div id="dock-body">
             <div class="tab" data-tab="sequencer">
-              <div class="seq-controls">
-                <label>Style <select id="seq-style"></select></label>
-                <label>Scale <select id="seq-scale"></select></label>
-                <label>Root <select id="seq-root"></select></label>
-                <label>Synth <select id="seq-wave">
-                  <option value="triangle">Soft</option>
-                  <option value="sawtooth">Bright</option>
-                  <option value="square">Hollow</option>
-                  <option value="sine">Pure</option>
-                </select></label>
-                <label>Swing <input id="seq-swing" type="range" min="0" max="0.8" step="0.05" /></label>
-                <label>Volume <input id="seq-volume" type="range" min="0" max="1" step="0.01" /></label>
-                <label class="check"><input id="seq-sound" type="checkbox" /> Sound on</label>
-              </div>
-              <div class="gen-knobs">
-                <div id="gen-sliders"></div>
-                <div class="row-buttons">
-                  <button type="button" id="gen-new" title="Start from a fresh pattern and melody">New idea</button>
-                  <button type="button" id="gen-fill" title="Play a drum fill at the end of the bar">Fill</button>
-                  <button type="button" id="gen-hold" title="Freeze the pattern so it stops evolving">Hold</button>
+              <section class="seq-part part-global">
+                <header class="part-head"><span class="part-title">Global</span></header>
+                <div class="global-cols">
+                  <div class="seq-controls">
+                    <label>Style <select id="seq-style" title="The overall feel. Picking one sets the drum rings to its starting pattern."></select></label>
+                    <label>Scale <select id="seq-scale"></select></label>
+                    <label>Root <select id="seq-root"></select></label>
+                    <label>Synth <select id="seq-wave" title="The melody's sound">
+                      <option value="triangle">Soft</option>
+                      <option value="sawtooth">Bright</option>
+                      <option value="square">Hollow</option>
+                      <option value="sine">Pure</option>
+                    </select></label>
+                    <label>Volume <input id="seq-volume" type="range" min="0" max="1" step="0.01" /></label>
+                  </div>
+                  <div>
+                    <div id="global-sliders" class="part-sliders"></div>
+                    <div class="row-buttons">
+                      <label class="check"><input id="seq-sound" type="checkbox" /> Sound on</label>
+                      <button type="button" id="gen-new" class="small" title="Start from fresh patterns, melody and progression">New idea</button>
+                      <button type="button" id="gen-fill" class="small" title="Play a drum fill at the end of the bar">Fill</button>
+                      <button type="button" id="gen-hold" class="small" title="Freeze every part so it stops evolving">Hold</button>
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div class="gen-pad-wrap">
-                <canvas id="gen-pad" width="150" height="150" title="Drag: left-right sets drum density, up-down sets melody density"></canvas>
-                <div class="gen-pad-label">Drums →<br />Melody ↑</div>
-              </div>
-              <div class="gen-view-wrap"><canvas id="gen-view"></canvas></div>
+              </section>
+              <section class="seq-part part-drums">
+                <header class="part-head">
+                  <label class="check"><input id="part-drums" type="checkbox" /> <span class="part-title">Drums</span></label>
+                  <span class="part-led" id="led-drums"></span>
+                </header>
+                <div class="drums-body">
+                  <canvas id="drum-ring" title="Drag a ring round to turn its pattern. Double-click to put it back."></canvas>
+                  <div id="drum-tracks"></div>
+                </div>
+              </section>
+              <section class="seq-part part-bass">
+                <header class="part-head">
+                  <label class="check"><input id="part-bass" type="checkbox" /> <span class="part-title">Bass</span></label>
+                  <span class="part-led" id="led-bass"></span>
+                </header>
+                <div id="bass-controls" class="part-sliders"></div>
+              </section>
+              <section class="seq-part part-chords">
+                <header class="part-head">
+                  <label class="check"><input id="part-chords" type="checkbox" /> <span class="part-title">Chords</span></label>
+                  <span class="part-led" id="led-chords"></span>
+                </header>
+                <div id="chord-chips" class="chord-chips"></div>
+                <div id="chord-controls" class="part-sliders two-col"></div>
+              </section>
+              <section class="seq-part part-melody">
+                <header class="part-head">
+                  <label class="check"><input id="part-melody" type="checkbox" /> <span class="part-title">Melody</span></label>
+                  <span class="part-led" id="led-melody"></span>
+                </header>
+                <canvas id="melody-view"></canvas>
+                <div id="melody-controls" class="part-sliders"></div>
+              </section>
             </div>
             <div class="tab" data-tab="global" hidden>
               <div class="global-layout">

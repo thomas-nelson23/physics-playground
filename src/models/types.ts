@@ -41,6 +41,8 @@ export type ParamSpec = ParamCommon &
       max: number;
       step: number;
       default: number;
+      /** Optional readout text, e.g. "1 bar" instead of the number. */
+      format?: (value: number) => string;
     }
   | {
       kind: "boolean";
@@ -78,8 +80,12 @@ export interface PointerInput {
  */
 export type ReactionSource = NoteRole | "level" | "bass" | "mid" | "treble" | "spectrum" | "beat";
 
-/** What kind of hit a note is. Drum sounds are told apart so models can react to the beat. */
-export type NoteRole = "kick" | "snare" | "hat" | "tone";
+/**
+ * What kind of hit a note is. Drum sounds are told apart so models can react
+ * to the beat; "tone" is the melody, "bassline" the bass part and "chord" a
+ * chord hit from the sequencer.
+ */
+export type NoteRole = "kick" | "snare" | "hat" | "tone" | "bassline" | "chord";
 
 /**
  * A musical event, from the built-in sequencer, a MIDI device, or a beat
@@ -97,6 +103,8 @@ export interface NoteEvent {
    */
   x: number;
   source: "sequencer" | "midi" | "audio";
+  /** For a chord, every note in it, lowest first. */
+  notes?: number[];
 }
 
 /**
@@ -139,11 +147,13 @@ export interface ModRoute {
  * reaction is switched off in the modulation matrix.
  */
 export interface MusicFrame {
-  /** Drum and melody envelopes: jump to the hit's velocity, then decay. */
+  /** Drum, melody, bass-part and chord envelopes: jump to the hit's velocity, then decay. */
   kick: number;
   snare: number;
   hat: number;
   tone: number;
+  bassline: number;
+  chord: number;
   /** Loudness of everything playing, and its bass, mid and treble bands, roughly 0..1. */
   level: number;
   bass: number;
@@ -160,15 +170,17 @@ export interface MusicFrame {
   /** Hue in degrees of the last melody note, and how high it was, 0..1. */
   hue: number;
   pitch: number;
+  /** Hue in degrees of the current chord's root. */
+  chordHue: number;
   /** Overall activity, a blend of loudness and recent hits. */
   energy: number;
 }
 
 /** A silent frame, for stepping a model outside the main loop. */
 export const SILENT_MUSIC: MusicFrame = {
-  kick: 0, snare: 0, hat: 0, tone: 0, level: 0, bass: 0, mid: 0, treble: 0,
+  kick: 0, snare: 0, hat: 0, tone: 0, bassline: 0, chord: 0, level: 0, bass: 0, mid: 0, treble: 0,
   spectrum: new Float32Array(48), wave: new Float32Array(128),
-  beats: 0, pulse: 0, hue: 210, pitch: 0.5, energy: 0,
+  beats: 0, pulse: 0, hue: 210, pitch: 0.5, chordHue: 210, energy: 0,
 };
 
 export interface SimulationModel {

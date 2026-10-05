@@ -237,6 +237,18 @@ class ParticleBloom implements SimulationModel {
       this.burst(cx + Math.cos(a) * R, cy + Math.sin(a) * R, Math.round(sparks * 1.5 * ev.velocity), 500 * punch, hue, 60);
     } else if (ev.role === "hat") {
       for (let k = 0; k < this.base * 0.08; k++) this.flare[Math.floor(Math.random() * this.base)] = ev.velocity;
+    } else if (ev.role === "bassline") {
+      // A slow, soft shockwave in the bass note's colour.
+      this.shocks.push({ x: cx, y: cy, r: 0, speed: 420, punch: 30 * punch * ev.velocity, life: 0.8, hue: noteHue(ev.note) });
+      if (this.shocks.length > 4) this.shocks.shift();
+    } else if (ev.role === "chord") {
+      // The chord dyes a share of the ring in its notes' colours, which then drift back.
+      const notes = ev.notes ?? [ev.note];
+      for (let k = 0; k < this.base * 0.3 * ev.velocity; k++) {
+        const i = Math.floor(Math.random() * this.base);
+        this.hue[i] = noteHue(notes[k % notes.length]);
+        this.flare[i] = Math.max(this.flare[i], ev.velocity * 0.5);
+      }
     } else {
       // A fountain from the ring, at an angle set by pitch: low notes at the bottom, rising round both sides.
       const R = this.ringRadius(p, 0);
@@ -347,6 +359,8 @@ export const particles: ModelDefinition = {
     { source: "snare", text: "A burst of sparks from a random point on the ring" },
     { source: "hat", text: "A scattering of particles flares bright" },
     { source: "tone", text: "A fountain of sparks in the note's colour; low notes from the bottom of the ring" },
+    { source: "bassline", text: "A slow, soft shockwave in the bass note's colour" },
+    { source: "chord", text: "Dyes part of the ring in the chord's colours, which drift back" },
     { source: "bass", text: "The ring swells and shrinks (Bass breathing)" },
     { source: "spectrum", text: "Loud frequencies bulge the ring out (Spectrum shape)" },
     { source: "level", text: "Loud passages make every glow bigger" },

@@ -207,6 +207,19 @@ class BoidsSim implements SimulationModel {
       // A vortex spins up somewhere and drags the flock round, turning the other way each time.
       this.vortex = { x: width * (0.2 + Math.random() * 0.6), y: height * (0.2 + Math.random() * 0.6), life: ev.velocity, dir: this.vortex ? -this.vortex.dir : 1 };
       this.flash = Math.max(this.flash, ev.velocity * 0.5);
+    } else if (ev.role === "bassline") {
+      // A low lure along the bottom, placed by pitch, that drags the flock down.
+      this.lures.push({ x: width * (0.15 + ev.x * 0.7), y: height * 0.82, life: 1, strength: ev.velocity * 0.6 });
+      if (this.lures.length > 6) this.lures.shift();
+    } else if (ev.role === "chord") {
+      // A share of the flock takes the chord's colours.
+      const notes = ev.notes ?? [ev.note];
+      for (let k = 0; k < this.boids.length * 0.3 * ev.velocity; k++) {
+        const b = this.boids[Math.floor(Math.random() * this.boids.length)];
+        const h = (noteHue(notes[k % notes.length]) * Math.PI) / 180;
+        b.hx = Math.cos(h); b.hy = Math.sin(h);
+        b.spark = Math.max(b.spark, ev.velocity * 0.3);
+      }
     } else {
       for (let k = 0; k < this.boids.length * 0.1; k++) this.boids[Math.floor(Math.random() * this.boids.length)].spark = ev.velocity;
     }
@@ -310,6 +323,8 @@ export const boids: ModelDefinition = {
     { source: "kick", text: "Blasts the flock outward from the centre and flashes it" },
     { source: "snare", text: "Spins a vortex through the flock, alternating direction" },
     { source: "hat", text: "A sprinkling of birds sparkle" },
+    { source: "bassline", text: "A low lure along the bottom, placed by pitch, drags the flock down" },
+    { source: "chord", text: "A share of the flock takes the chord's colours" },
     { source: "bass", text: "Stretches the streaks" },
     { source: "level", text: "The flock glows brighter as the music gets louder" },
     { source: "treble", text: "Sparkles shine brighter" },

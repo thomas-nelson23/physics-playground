@@ -92,7 +92,7 @@ export function renderParamControls(
       input.step = String(spec.step);
       input.value = String(values[spec.key]);
 
-      const show = () => (readout.textContent = formatNumber(Number(input.value), spec.step));
+      const show = () => (readout.textContent = spec.format ? spec.format(Number(input.value)) : formatNumber(Number(input.value), spec.step));
       show();
       input.addEventListener("input", () => {
         values[spec.key] = Number(input.value);

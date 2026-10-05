@@ -230,8 +230,15 @@ class CymaticsSim implements SimulationModel {
       const list = this.modes();
       this.setMode(Math.round(ev.x * Math.min(list.length - 1, this.round ? 40 : 36)));
       this.shake = Math.max(this.shake, ev.velocity * 1.5 * punch);
+    } else if (ev.role === "chord") {
+      // Each chord rings its own figure, set by the chord's root.
+      const list = this.modes();
+      const pc = ((ev.note % 12) + 12) % 12;
+      this.setMode(Math.round((pc / 11) * Math.min(list.length - 1, this.round ? 24 : 20)));
+      this.shake = Math.max(this.shake, ev.velocity * 0.8 * punch);
     } else {
-      this.shake = Math.max(this.shake, ev.velocity * (ev.role === "kick" ? 3 : ev.role === "snare" ? 1.6 : 0.6) * punch);
+      const kick = ev.role === "kick" ? 3 : ev.role === "snare" ? 1.6 : ev.role === "bassline" ? 1 : 0.6;
+      this.shake = Math.max(this.shake, ev.velocity * kick * punch);
     }
   }
 
@@ -331,6 +338,8 @@ export const chladni: ModelDefinition = {
     { source: "kick", text: "A hard shake that throws the sand off the lines" },
     { source: "snare", text: "A medium shake that blurs the figure" },
     { source: "hat", text: "A light shiver" },
+    { source: "bassline", text: "A soft thump that loosens the sand" },
+    { source: "chord", text: "Each chord rings its own figure, set by its root" },
     { source: "level", text: "Loud music keeps the sand churning and turns the round plate faster" },
     { source: "treble", text: "Grains sparkle bigger" },
   ],
