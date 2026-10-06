@@ -9,41 +9,73 @@
   </head>
   <body>
     <div id="app">
-      <aside id="sidebar">
-        <header>
-          <h1>Physics Playground</h1>
-        </header>
-        <section>
-          <label class="section-label" for="model-select">Model</label>
+      <header id="toolbar">
+        <div class="brand" title="Physics Playground"><span class="brand-mark">Pp</span></div>
+        <div class="tool-group">
+          <label class="tool-label" for="model-select">Model</label>
           <select id="model-select"></select>
-          <p id="model-description" class="muted"></p>
-        </section>
-        <section class="transport">
-          <button id="play-pause" type="button">Pause</button>
-          <button id="step" type="button">Step</button>
-          <button id="reset" type="button">Reset</button>
-        </section>
-        <section>
-          <div class="section-head">
-            <div class="section-label">Parameters</div>
-            <button type="button" id="randomize" class="small" title="Set every parameter of this model to a random value">Randomize</button>
+        </div>
+        <span class="tool-sep"></span>
+        <div class="tool-group transport">
+          <button id="play-pause" type="button" title="Pause or play the visuals and the music (Space)">Pause</button>
+          <button id="step" type="button" title="Advance one frame while paused (.)">Step</button>
+          <button id="reset" type="button" title="Start the model over (R)">Reset</button>
+        </div>
+        <span class="tool-sep"></span>
+        <div class="tool-group">
+          <button type="button" id="randomize" title="Set every parameter of this model to a random value">Randomize</button>
+        </div>
+        <span class="spacer"></span>
+        <div class="tool-group">
+          <button type="button" id="dock-toggle" title="Hide the music panel">Hide music</button>
+        </div>
+      </header>
+      <aside id="sidebar">
+        <details class="panel" data-panel="model" open>
+          <summary class="panel-head"><span class="panel-title">Model</span></summary>
+          <div class="panel-body">
+            <p id="model-description" class="muted"></p>
+            <div class="sub-label">Interaction</div>
+            <p id="model-hint" class="muted"></p>
           </div>
-          <div id="params"></div>
-        </section>
-        <section>
-          <div class="section-label">Interaction</div>
-          <p id="model-hint" class="muted"></p>
-        </section>
-        <footer class="muted" id="stats"></footer>
+        </details>
+        <details class="panel" data-panel="params" open>
+          <summary class="panel-head"><span class="panel-title">Parameters</span></summary>
+          <div class="panel-body">
+            <div id="params"></div>
+          </div>
+        </details>
+        <details class="panel" data-panel="global" open>
+          <summary class="panel-head">
+            <span class="panel-title">Global controls</span>
+            <span class="panel-note">every model</span>
+            <button type="button" id="global-reset" class="panel-action" title="Put every global control back to neutral">Reset</button>
+          </summary>
+          <div class="panel-body">
+            <div id="global-controls"></div>
+          </div>
+        </details>
+        <details class="panel" data-panel="macros" open>
+          <summary class="panel-head">
+            <span class="panel-title">Macros</span>
+            <span class="panel-note" id="macros-model"></span>
+            <button type="button" id="macros-reset" class="panel-action" title="Turn every macro back to zero">Zero</button>
+          </summary>
+          <div class="panel-body">
+            <div id="macros"></div>
+          </div>
+        </details>
       </aside>
       <main id="main">
+        <div id="doc-tabs">
+          <span class="doc-tab"><span id="doc-title"></span><span id="doc-state" class="doc-state"></span></span>
+        </div>
         <div id="stage">
           <canvas id="canvas"></canvas>
         </div>
         <section id="dock">
           <nav id="dock-tabs">
             <button type="button" data-tab="sequencer" class="active">Sequencer</button>
-            <button type="button" data-tab="global">Global &amp; macros</button>
             <button type="button" data-tab="modulation">Modulation</button>
             <button type="button" data-tab="midi">MIDI</button>
             <button type="button" data-tab="audio">Audio file</button>
@@ -51,7 +83,6 @@
             <button type="button" id="seq-play" class="primary">Play</button>
             <button type="button" id="seq-mute">Mute</button>
             <span id="midi-led" class="led" title="MIDI activity"></span>
-            <button type="button" id="dock-toggle" title="Hide the music panel">Hide</button>
           </nav>
           <div id="dock-body">
             <div class="tab" data-tab="sequencer">
@@ -114,24 +145,6 @@
                 <div id="melody-controls" class="part-sliders"></div>
               </section>
             </div>
-            <div class="tab" data-tab="global" hidden>
-              <div class="global-layout">
-                <div class="global-main">
-                  <div class="section-label">Global controls <span class="label-note">· the same in every model</span></div>
-                  <div id="global-controls"></div>
-                  <div class="row-buttons">
-                    <button type="button" id="global-reset" title="Put every global control back to neutral">Reset global controls</button>
-                  </div>
-                </div>
-                <div class="global-macros">
-                  <div class="section-label">Macros <span class="label-note">· <span id="macros-model"></span></span></div>
-                  <div id="macros"></div>
-                  <div class="row-buttons">
-                    <button type="button" id="macros-reset" title="Turn every macro back to zero">Zero macros</button>
-                  </div>
-                </div>
-              </div>
-            </div>
             <div class="tab" data-tab="modulation" hidden>
               <div class="mod-layout">
                 <div class="mod-side">
@@ -191,6 +204,7 @@
             </div>
           </div>
         </section>
+        <footer id="statusbar"><span id="stats"></span><span class="spacer"></span><span class="status-hint">Space play/pause · R reset · Enter sequencer</span></footer>
       </main>
     </div>
     <script type="module" src="/src/main.ts"></script>

@@ -62,7 +62,7 @@ function drumSpecs(key: DrumKey): ParamSpec[] {
       description: "How many hits the ring spreads evenly round its pattern." },
     { kind: "number", key: `${key}Variation`, label: "Variation", min: 0, max: 1, step: 0.01, default: 0.3, format: pct,
       description: "How much each bar strays: ghost notes, dropped hits and nudges." },
-    { kind: "number", key: `${key}Length`, label: "Length", min: 1, max: MAX_DRUM_LENGTH, step: 1, default: 16, format: (v) => `${v}`,
+    { kind: "number", key: `${key}Length`, label: "Steps", min: 1, max: MAX_DRUM_LENGTH, step: 1, default: 16, format: (v) => `${v}`,
       description: "How many sixteenths the pattern has before it repeats. Anything but 16 drifts against the bar." },
     { kind: "number", key: `${key}Rotate`, label: "Offset", min: 0, max: MAX_DRUM_LENGTH - 1, step: 1, default: 0,
       format: (v) => `${liveSeq ? v % liveSeq.length(key) : v}`,
@@ -667,8 +667,6 @@ export class Studio {
     };
     $("sidebar").addEventListener("pointerdown", pickTarget);
     document.querySelector<HTMLElement>('#dock-body .tab[data-tab="sequencer"]')?.addEventListener("pointerdown", pickTarget);
-    $("global-controls").addEventListener("pointerdown", pickTarget);
-    $("macros").addEventListener("pointerdown", pickTarget);
 
     // Audio file
     const file = $<HTMLInputElement>("audio-file");
@@ -709,7 +707,8 @@ export class Studio {
 
   private setDockHidden(hidden: boolean): void {
     $("dock").classList.toggle("collapsed", hidden);
-    $("dock-toggle").textContent = hidden ? "Show" : "Hide";
+    $("dock-toggle").textContent = hidden ? "Show music" : "Hide music";
+    $("dock-toggle").title = hidden ? "Show the music panel" : "Hide the music panel";
     if (this.settings.dockHidden !== hidden) {
       this.settings.dockHidden = hidden;
       this.saveGlobal();
@@ -733,7 +732,7 @@ export class Studio {
     const values = seq as unknown as ParamValues;
     const changed = (spec: ParamSpec) => {
       if (spec.key === "chordStyle") this.seq.refreshHarmony();
-      // Length and density change each other's readouts (hits, offset within the length).
+      // Steps and density change each other's readouts (hits, offset within the length).
       if (/^(kick|snare|hat)(Length|Density|Rotate)$/.test(spec.key)) this.refreshSeqControls();
       this.seq.version++;
       this.saveGlobal();

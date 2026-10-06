@@ -1,6 +1,7 @@
 import { models, findModel } from "./models/registry";
 import { defaultParams, SILENT_MUSIC, type ModelDefinition, type MusicFrame, type ParamSpec, type ParamValues, type PointerInput, type SimulationModel, type Viewport } from "./models/types";
 import { renderParamControls, type ParamControls } from "./ui/controls";
+import { setupPanels } from "./ui/panels";
 import { Studio } from "./music/studio";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -17,6 +18,8 @@ const stepBtn = $<HTMLButtonElement>("step");
 const resetBtn = $<HTMLButtonElement>("reset");
 const statsEl = $<HTMLElement>("stats");
 const randomizeBtn = $<HTMLButtonElement>("randomize");
+const docTitle = $<HTMLElement>("doc-title");
+const docState = $<HTMLElement>("doc-state");
 
 const MAX_STEPS_PER_FRAME = 8;
 
@@ -73,6 +76,7 @@ function loadModel(id: string): void {
   g.fillStyle = "#0d1117";
   g.fillRect(0, 0, view.width, view.height);
   description.textContent = def.description;
+  docTitle.textContent = def.name;
   hint.textContent = def.hint ?? "No canvas interaction for this model.";
   const onChange = (spec: ParamSpec) => {
     if (spec.resetOnChange) {
@@ -163,6 +167,7 @@ function setRunning(value: boolean): void {
   if (value !== running) studio.setPaused(!value);
   running = value;
   playPause.textContent = running ? "Pause" : "Play";
+  docState.textContent = running ? "" : "Paused";
   stepBtn.disabled = running;
 }
 
@@ -224,6 +229,7 @@ function frame(now: number): void {
 
 // ---- Boot ------------------------------------------------------------------
 
+setupPanels();
 populateModelSelect();
 resize();
 let initial = models[0].id;
