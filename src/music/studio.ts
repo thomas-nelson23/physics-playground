@@ -6,8 +6,8 @@ import { dispatchMidi, openMidi, type MidiInputs } from "./midi";
 import { applyModulation, macroSpecs, modulatable, ModSources, SOURCES, sourceLabel, type NumberSpec } from "./modulation";
 import { GLOBAL_SPECS, applyGlobals, canvasFilter, defaultGlobals, sanitizeGlobals } from "./globals";
 import {
-  BASS_STYLES, CHORD_SPEED_LABELS, CHORD_STYLES, DRUMS, MELODY_STYLES, ROOTS, SCALES, STEPS, STYLES,
-  Sequencer, applyStyleDensities, chordName, sanitizeState, type SequencerState,
+  BASS_STYLES, CHORD_SPEED_LABELS, CHORD_STYLES, DRUM_RESETS, DRUMS, MAX_DRUM_LENGTH, MELODY_STYLES, ROOTS, SCALES, STEPS, STYLES,
+  Sequencer, applyStyleDensities, chordName, sanitizeState, type DrumKey, type SequencerState,
 } from "./sequencer";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -49,13 +49,26 @@ const BASS_RANGE_LABELS = ["Root only", "+ octave", "+ fifth", "+ third", "+ low
 /** Drum ring radii as a share of the canvas radius, kick innermost. */
 const RING_RADII = [0.4, 0.68, 0.94];
 
-function drumSpecs(key: string, max: number): ParamSpec[] {
+/** The running sequencer, so drum readouts can show hits for the pattern's current length. */
+let liveSeq: Sequencer | null = null;
+
+function drumSpecs(key: DrumKey): ParamSpec[] {
   return [
     { kind: "number", key: `${key}Density`, label: "Density", min: 0, max: 1, step: 0.01, default: 0.3,
-      format: (v) => `${v <= 0 ? 0 : Math.max(1, Math.round(v * max))} hits`,
-      description: "How many hits the ring spreads evenly round the bar." },
+      format: () => {
+        const n = liveSeq?.pulses(key) ?? 0;
+        return `${n} hit${n === 1 ? "" : "s"}`;
+      },
+      description: "How many hits the ring spreads evenly round its pattern." },
     { kind: "number", key: `${key}Variation`, label: "Variation", min: 0, max: 1, step: 0.01, default: 0.3, format: pct,
       description: "How much each bar strays: ghost notes, dropped hits and nudges." },
+    { kind: "number", key: `${key}Length`, label: "Length", min: 1, max: MAX_DRUM_LENGTH, step: 1, default: 16, format: (v) => `${v}`,
+      description: "How many sixteenths the pattern has before it repeats. Anything but 16 drifts against the bar." },
+    { kind: "number", key: `${key}Rotate`, label: "Offset", min: 0, max: MAX_DRUM_LENGTH - 1, step: 1, default: 0,
+      format: (v) => `${liveSeq ? v % liveSeq.length(key) : v}`,
+      description: "Turns the pattern round its ring, so it starts on a different step." },
+    { kind: "choice", key: `${key}Reset`, label: "Reset", options: DRUM_RESETS, default: "0",
+      description: "Brings the pattern back to its start every so many bars." },
   ];
 }
 
@@ -69,7 +82,7 @@ const PARTS: { part: string; specs: ParamSpec[] }[] = [
     { kind: "number", key: "swing", label: "Swing", min: 0, max: 0.8, step: 0.05, default: 0, format: pct,
       description: "Delays every second sixteenth for a shuffled feel." },
   ] },
-  ...DRUMS.map((d) => ({ part: d.label, specs: drumSpecs(d.key, d.max) })),
+  ...DRUMS.map((d) => ({ part: d.label, specs: drumSpecs(d.key) })),
   { part: "Bass", specs: [
     { kind: "choice", key: "bassStyle", label: "Style", options: choices(BASS_STYLES), default: "pulse" },
     { kind: "number", key: "bassDensity", label: "Density", min: 0, max: 1, step: 0.01, default: 0.4, format: pct,
@@ -200,7 +213,7 @@ export class Studio {
       seq,
       globals: sanitizeGlobals(saved.globals),
     };
-    this.seq = new Sequencer(this.audio, seq);
+    this.seq = liveSeq = new Sequencer(this.audio, seq);
     this.audio.setVolume(this.settings.volume);
     this.sources.decay = this.settings.decay;
     this.buildDock();
@@ -720,6 +733,8 @@ export class Studio {
     const values = seq as unknown as ParamValues;
     const changed = (spec: ParamSpec) => {
       if (spec.key === "chordStyle") this.seq.refreshHarmony();
+      // Length and density change each other's readouts (hits, offset within the length).
+      if (/^(kick|snare|hat)(Length|Density|Rotate)$/.test(spec.key)) this.refreshSeqControls();
       this.seq.version++;
       this.saveGlobal();
     };
@@ -759,17 +774,37 @@ export class Studio {
     const volume = $<HTMLInputElement>("seq-volume");
     volume.value = String(s.volume);
     volume.addEventListener("input", () => { s.volume = Number(volume.value); this.audio.setVolume(s.volume); this.saveGlobal(); });
-    const sound = $<HTMLInputElement>("seq-sound");
-    sound.checked = seq.sound;
-    sound.addEventListener("change", () => { seq.sound = sound.checked; this.saveGlobal(); });
+    const mute = $<HTMLButtonElement>("seq-mute");
+    const showMute = () => {
+      mute.classList.toggle("active", !seq.sound);
+      mute.textContent = seq.sound ? "Mute" : "Muted";
+      mute.title = seq.sound ? "Silence the sequencer; the visuals keep reacting" : "Let the sequencer be heard again";
+    };
+    showMute();
+    mute.addEventListener("click", () => {
+      seq.sound = !seq.sound;
+      if (!seq.sound) this.audio.allNotesOff();
+      showMute();
+      this.saveGlobal();
+      mute.blur();
+    });
     $("gen-new").addEventListener("click", () => { this.seq.newIdea(); this.saveGlobal(); });
     $("gen-fill").addEventListener("click", () => this.seq.fill());
+    // Hold: the global one freezes every part; each part's own freezes just that part.
+    const holds: [HTMLButtonElement, "drumsHold" | "bassHold" | "chordsHold" | "melodyHold"][] = [];
     const hold = $<HTMLButtonElement>("gen-hold");
-    hold.classList.toggle("active", seq.hold);
+    const showHolds = () => {
+      hold.classList.toggle("active", seq.hold);
+      for (const [b, key] of holds) {
+        b.classList.toggle("active", seq.hold || seq[key]);
+        b.classList.toggle("forced", seq.hold && !seq[key]);
+      }
+    };
     hold.addEventListener("click", () => {
       seq.hold = !seq.hold;
-      hold.classList.toggle("active", seq.hold);
+      showHolds();
       this.saveGlobal();
+      hold.blur();
     });
 
     // Parts on and off, with a light that flashes as each one plays.
@@ -780,6 +815,15 @@ export class Studio {
       ["melody", "melodyOn", () => this.sources.get("tone")],
     ];
     for (const [id, key, level] of parts) {
+      const holdKey = `${id}Hold` as "drumsHold" | "bassHold" | "chordsHold" | "melodyHold";
+      const partHold = $<HTMLButtonElement>(`hold-${id}`);
+      holds.push([partHold, holdKey]);
+      partHold.addEventListener("click", () => {
+        seq[holdKey] = !seq[holdKey];
+        showHolds();
+        this.saveGlobal();
+        partHold.blur();
+      });
       const box = $<HTMLInputElement>(`part-${id}`);
       const section = box.closest(".seq-part")!;
       box.checked = seq[key];
@@ -792,6 +836,7 @@ export class Studio {
       });
       this.leds.push({ el: $(`led-${id}`), level });
     }
+    showHolds();
 
     // Drums: one row per track beside the rings.
     const tracks = $("drum-tracks");
@@ -853,21 +898,23 @@ export class Studio {
       RING_RADII.forEach((rr, i) => { if (Math.abs(rr - radius) < Math.abs(RING_RADII[track] - radius)) track = i; });
       return { track, angle: Math.atan2(dy, dx) };
     };
-    let drag: { key: string; angle: number; rotate: number } | null = null;
+    let drag: { key: DrumKey; angle: number; rotate: number } | null = null;
     ring.addEventListener("pointerdown", (e) => {
       const { track, angle } = at(e);
-      const key = `${DRUMS[track].key}Rotate`;
-      drag = { key, angle, rotate: seq[key] };
+      const key = DRUMS[track].key;
+      drag = { key, angle, rotate: this.seq.rotation(key) };
       ring.setPointerCapture(e.pointerId);
     });
     ring.addEventListener("pointermove", (e) => {
       if (!drag) return;
       let delta = at(e).angle - drag.angle;
       delta = Math.atan2(Math.sin(delta), Math.cos(delta));
-      const next = (((drag.rotate + Math.round((delta / (Math.PI * 2)) * STEPS)) % STEPS) + STEPS) % STEPS;
-      if (next !== seq[drag.key]) {
-        seq[drag.key] = next;
+      const len = this.seq.length(drag.key);
+      const next = (((drag.rotate + Math.round((delta / (Math.PI * 2)) * len)) % len) + len) % len;
+      if (next !== seq[`${drag.key}Rotate`]) {
+        seq[`${drag.key}Rotate`] = next;
         this.seq.version++;
+        this.refreshSeqControls();
       }
     });
     const end = () => {
@@ -877,9 +924,12 @@ export class Studio {
     };
     ring.addEventListener("pointerup", end);
     ring.addEventListener("pointercancel", end);
+    // Double-click puts a ring back where the style starts it.
     ring.addEventListener("dblclick", (e) => {
-      seq[`${DRUMS[at(e).track].key}Rotate`] = 0;
+      const key = DRUMS[at(e).track].key;
+      seq[`${key}Rotate`] = (STYLES[this.settings.seq.style] ?? STYLES.broken).rotate[key];
       this.seq.version++;
+      this.refreshSeqControls();
       this.saveGlobal();
     });
   }
@@ -899,29 +949,18 @@ export class Studio {
     const size = this.ringSize, c = size / 2, R = size / 2 - 8;
     const seq = this.settings.seq;
     g.clearRect(0, 0, size, size);
-    const angle = (step: number) => -Math.PI / 2 + (step / STEPS) * Math.PI * 2;
     const playing = this.seq.playing && this.seq.current >= 0;
-    // Beat ticks and the playhead.
+    // Each ring has its own number of steps, starting at the top.
     g.strokeStyle = "#30363d";
     g.lineWidth = 1;
-    for (let i = 0; i < STEPS; i += 4) {
-      const a = angle(i);
-      g.beginPath();
-      g.moveTo(c + Math.cos(a) * R * 0.2, c + Math.sin(a) * R * 0.2);
-      g.lineTo(c + Math.cos(a) * (R + 6), c + Math.sin(a) * (R + 6));
-      g.stroke();
-    }
-    if (playing) {
-      const a = angle(this.seq.current);
-      g.strokeStyle = "rgba(230, 237, 243, 0.35)";
-      g.lineWidth = 2;
-      g.beginPath();
-      g.moveTo(c, c);
-      g.lineTo(c + Math.cos(a) * (R + 6), c + Math.sin(a) * (R + 6));
-      g.stroke();
-    }
+    g.beginPath();
+    g.moveTo(c, c - R * 0.2);
+    g.lineTo(c, c - R - 6);
+    g.stroke();
     DRUMS.forEach((d, i) => {
       const r = RING_RADII[i] * R;
+      const len = this.seq.length(d.key);
+      const angle = (pos: number) => -Math.PI / 2 + (pos / len) * Math.PI * 2;
       const on = seq.drumsOn;
       g.globalAlpha = on ? 1 : 0.35;
       g.strokeStyle = "#30363d";
@@ -929,6 +968,17 @@ export class Studio {
       g.beginPath();
       g.arc(c, c, r, 0, Math.PI * 2);
       g.stroke();
+      const cur = playing ? this.seq.drumCurrent[i] : -1;
+      if (cur >= 0) {
+        // This ring's playhead: a short sweep across the ring.
+        const a = angle(cur);
+        g.strokeStyle = "rgba(230, 237, 243, 0.4)";
+        g.lineWidth = 2;
+        g.beginPath();
+        g.moveTo(c + Math.cos(a) * (r - 7), c + Math.sin(a) * (r - 7));
+        g.lineTo(c + Math.cos(a) * (r + 7), c + Math.sin(a) * (r + 7));
+        g.stroke();
+      }
       // The euclidean shape: a polygon through the pattern's hits.
       const base = this.seq.basePattern(i);
       const pts = base.map((hit, k) => (hit ? k : -1)).filter((k) => k >= 0);
@@ -945,8 +995,10 @@ export class Studio {
         g.stroke();
       }
       const env = this.sources.get(d.role);
-      for (let k = 0; k < STEPS; k++) {
-        const hit = this.seq.drumHit(i, k);
+      // Fills land at the end of the bar, so they only show on a ring that's a bar long.
+      const barLong = len === STEPS;
+      for (let k = 0; k < len; k++) {
+        const hit = this.seq.drumHit(i, k, barLong ? k : -1);
         const x = c + Math.cos(angle(k)) * r, y = c + Math.sin(angle(k)) * r;
         g.globalAlpha = on ? 1 : 0.35;
         if (!hit.on) {
@@ -956,7 +1008,7 @@ export class Studio {
           g.fill();
           continue;
         }
-        const now = playing && k === this.seq.current;
+        const now = k === cur;
         const rad = 2.5 + 2.5 * hit.velocity + (now ? 3 * env : 0);
         if (hit.kind === "ghost") {
           g.strokeStyle = d.colour;

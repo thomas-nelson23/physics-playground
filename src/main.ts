@@ -1,6 +1,6 @@
 import { models, findModel } from "./models/registry";
 import { defaultParams, SILENT_MUSIC, type ModelDefinition, type MusicFrame, type ParamSpec, type ParamValues, type PointerInput, type SimulationModel, type Viewport } from "./models/types";
-import { renderParamControls } from "./ui/controls";
+import { renderParamControls, type ParamControls } from "./ui/controls";
 import { Studio } from "./music/studio";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -16,6 +16,7 @@ const playPause = $<HTMLButtonElement>("play-pause");
 const stepBtn = $<HTMLButtonElement>("step");
 const resetBtn = $<HTMLButtonElement>("reset");
 const statsEl = $<HTMLElement>("stats");
+const randomizeBtn = $<HTMLButtonElement>("randomize");
 
 const MAX_STEPS_PER_FRAME = 8;
 
@@ -25,6 +26,7 @@ let model: SimulationModel;
 let params: ParamValues;
 /** What the model sees: slider values pushed by macros and modulation. */
 let effective: ParamValues = {};
+let paramControls: ParamControls | null = null;
 /** What the music is doing this frame, as the model sees it. */
 let music: MusicFrame = SILENT_MUSIC;
 let view: Viewport = { width: 1, height: 1 };
@@ -78,13 +80,40 @@ function loadModel(id: string): void {
       model.reset(view, effective);
     }
   };
-  const controls = renderParamControls(paramsEl, def.params, params, onChange);
+  const controls = (paramControls = renderParamControls(paramsEl, def.params, params, onChange));
   studio.setModel(def, params, controls, onChange);
   try {
     localStorage.setItem("lastModel", def.id);
   } catch {
     // Storage can be unavailable; remembering the model is only a convenience.
   }
+}
+
+/**
+ * Give every parameter of the model a random value. Setup sizes (particle and
+ * bird counts, grains and so on) stay between their minimum and half again
+ * their default, so a roll never stalls the frame rate.
+ */
+function randomizeParams(): void {
+  let rebuild = false;
+  for (const spec of def.params) {
+    const before = params[spec.key];
+    if (spec.kind === "number") {
+      const max = spec.resetOnChange ? Math.min(spec.max, Math.max(spec.min + spec.step, (spec.default as number) * 1.5)) : spec.max;
+      const steps = Math.floor((max - spec.min) / spec.step + 1e-9);
+      params[spec.key] = Number((spec.min + Math.round(Math.random() * steps) * spec.step).toFixed(6));
+    } else if (spec.kind === "choice") {
+      params[spec.key] = spec.options[Math.floor(Math.random() * spec.options.length)].value;
+    } else {
+      params[spec.key] = Math.random() < 0.5;
+    }
+    if (spec.resetOnChange && params[spec.key] !== before) {
+      effective[spec.key] = params[spec.key];
+      rebuild = true;
+    }
+  }
+  paramControls?.refresh();
+  if (rebuild) model.reset(view, effective);
 }
 
 // ---- Canvas sizing ---------------------------------------------------------
@@ -141,6 +170,10 @@ playPause.addEventListener("click", () => setRunning(!running));
 stepBtn.addEventListener("click", () => model.step(def.fixedDt ?? 1 / 60, effective, music));
 resetBtn.addEventListener("click", () => model.reset(view, effective));
 select.addEventListener("change", () => loadModel(select.value));
+randomizeBtn.addEventListener("click", () => {
+  randomizeParams();
+  randomizeBtn.blur();
+});
 
 window.addEventListener("keydown", (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;

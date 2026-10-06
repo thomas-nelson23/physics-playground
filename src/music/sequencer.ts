@@ -22,6 +22,14 @@ export const SCALES: Record<string, { label: string; steps: number[] }> = {
   whole: { label: "Whole tone", steps: [0, 2, 4, 6, 8, 10] },
 };
 
+/** Reset choices for a drum track: every how many bars its pattern starts over. "0" never does. */
+export const DRUM_RESETS = [
+  { value: "0", label: "None" }, { value: "1", label: "1 bar" }, { value: "2", label: "2 bars" },
+  { value: "4", label: "4 bars" }, { value: "8", label: "8 bars" }, { value: "16", label: "16 bars" },
+];
+/** Longest drum pattern, in sixteenths. */
+export const MAX_DRUM_LENGTH = 32;
+
 export const ROOTS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 /**
@@ -128,22 +136,35 @@ export interface SequencerState {
   style: string;
   /** Freeze every part instead of letting it evolve. */
   hold: boolean;
+  /** Freeze one part, leaving the others to evolve. */
+  drumsHold: boolean;
+  bassHold: boolean;
+  chordsHold: boolean;
+  melodyHold: boolean;
   seed: number;
   // Parts on or off
   drumsOn: boolean;
   bassOn: boolean;
   chordsOn: boolean;
   melodyOn: boolean;
-  // Drums: density picks how many euclidean hits, variation how much each bar strays.
+  // Drums: density picks how many euclidean hits, variation how much each bar strays,
+  // length how many steps the pattern has, rotate (Offset) where it starts, and
+  // reset every how many bars it starts over (a DRUM_RESETS value).
   kickDensity: number;
   kickVariation: number;
   kickRotate: number;
+  kickLength: number;
+  kickReset: string;
   snareDensity: number;
   snareVariation: number;
   snareRotate: number;
+  snareLength: number;
+  snareReset: string;
   hatDensity: number;
   hatVariation: number;
   hatRotate: number;
+  hatLength: number;
+  hatReset: string;
   // Bass
   bassStyle: string;
   bassDensity: number;
@@ -173,10 +194,11 @@ export interface SequencerState {
 export function defaultState(): SequencerState {
   const s: SequencerState = {
     tempo: 112, swing: 0, scale: "minorPent", root: 9, sound: true, style: "broken", hold: false, seed: 1,
+    drumsHold: false, bassHold: false, chordsHold: false, melodyHold: false,
     drumsOn: true, bassOn: true, chordsOn: true, melodyOn: true,
-    kickDensity: 0, kickVariation: 0.3, kickRotate: 0,
-    snareDensity: 0, snareVariation: 0.25, snareRotate: 0,
-    hatDensity: 0, hatVariation: 0.4, hatRotate: 0,
+    kickDensity: 0, kickVariation: 0.3, kickRotate: 0, kickLength: STEPS, kickReset: "0",
+    snareDensity: 0, snareVariation: 0.25, snareRotate: 0, snareLength: STEPS, snareReset: "0",
+    hatDensity: 0, hatVariation: 0.4, hatRotate: 0, hatLength: STEPS, hatReset: "0",
     bassStyle: "pulse", bassDensity: 0.4, bassRange: 3, bassVariation: 0.3,
     chordStyle: "pop", chordSpeed: 2, chordVariation: 0.3, chordDensity: 0.3, chordRhythm: 0.25, prog: 0,
     melodyStyle: "wander", melodyDensity: 0.4, melodyRange: 8, melodyGroove: 0.3,
@@ -185,12 +207,14 @@ export function defaultState(): SequencerState {
   return s;
 }
 
-/** Set the drum sliders to the style's starting pattern. */
+/** Set the drum sliders to the style's starting pattern: its hits and offsets over one bar. */
 export function applyStyleDensities(s: SequencerState): void {
   const st = STYLES[s.style] ?? STYLES.broken;
+  const rec = s as unknown as Record<string, number>;
   for (const d of DRUMS) {
-    (s as unknown as Record<string, number>)[`${d.key}Density`] = st.hits[d.key] / d.max;
-    (s as unknown as Record<string, number>)[`${d.key}Rotate`] = 0;
+    rec[`${d.key}Density`] = st.hits[d.key] / d.max;
+    rec[`${d.key}Rotate`] = st.rotate[d.key];
+    rec[`${d.key}Length`] = STEPS;
   }
 }
 
@@ -203,6 +227,16 @@ export function sanitizeState(saved: unknown): SequencerState {
     if (k in rec && typeof v === typeof rec[k] && (typeof v !== "number" || Number.isFinite(v))) rec[k] = v;
   }
   if (!(s.style in STYLES)) s.style = "broken";
+  const num = s as unknown as Record<string, number>;
+  const str = s as unknown as Record<string, string>;
+  // Saves from before drum lengths turned a ring relative to the style's placement; the offset now includes it.
+  const old = !("kickLength" in (saved as Record<string, unknown>));
+  for (const d of DRUMS) {
+    const len = (num[`${d.key}Length`] = Math.max(1, Math.min(MAX_DRUM_LENGTH, Math.round(num[`${d.key}Length`]))));
+    const rot = Math.round(num[`${d.key}Rotate`]) + (old ? STYLES[s.style].rotate[d.key] : 0);
+    num[`${d.key}Rotate`] = mod(rot, len);
+    if (!DRUM_RESETS.some((r) => r.value === str[`${d.key}Reset`])) str[`${d.key}Reset`] = "0";
+  }
   if (!(s.scale in SCALES)) s.scale = "minorPent";
   if (!(s.bassStyle in BASS_STYLES)) s.bassStyle = "pulse";
   if (!(s.chordStyle in CHORD_STYLES)) s.chordStyle = "pop";
@@ -337,6 +371,8 @@ export class Sequencer {
   playing = false;
   /** Step currently sounding, for the playhead. -1 when stopped. */
   current = -1;
+  /** Where each drum track is in its own pattern, for the rings' playheads. */
+  drumCurrent: number[] = DRUMS.map(() => -1);
   /** Bumped whenever the pattern changes, so views know to redraw. */
   version = 0;
   /** The progression this pass is playing, after Variation's substitutions. */
@@ -365,7 +401,7 @@ export class Sequencer {
   private nextTime = 0;
   private startTime = 0;
   private timer: number | undefined;
-  private queue: { time: number; step: number; chord: number; events: NoteEvent[] }[] = [];
+  private queue: { time: number; step: number; drumSteps: number[]; chord: number; events: NoteEvent[] }[] = [];
   /** Which chord the scheduler has reached (it runs a little ahead of what's heard). */
   private schedChord = -1;
 
@@ -460,7 +496,7 @@ export class Sequencer {
   /** Set up the next pass of the progression. Variation may switch progression and substitute chords. */
   private buildCycle(first: boolean): void {
     const r = this.rng;
-    const v = this.state.hold || first ? 0 : this.state.chordVariation;
+    const v = this.held("chords") || first ? 0 : this.state.chordVariation;
     const list = this.progressions();
     if (r() < v * 0.5) this.state.prog = (this.state.prog + 1 + Math.floor(r() * (list.length - 1))) % list.length;
     const syms = list[mod(this.state.prog, list.length)].split(" ");
@@ -469,7 +505,7 @@ export class Sequencer {
       return r() < v * 0.45 ? this.substitute(c) : c;
     });
     // Epic's wildcard: some passes lift the whole song up a step or two, then it comes home.
-    if (this.state.chordStyle === "epic" && !first && !this.state.hold) {
+    if (this.state.chordStyle === "epic" && !first && !this.held("chords")) {
       this.lift = this.lift === 0 && r() < v * 0.6 ? (r() < 0.5 ? 2 : 1) : 0;
     } else if (this.state.chordStyle !== "epic") {
       this.lift = 0;
@@ -510,47 +546,59 @@ export class Sequencer {
     const style = STYLES[s.style] ?? STYLES.broken;
     const drumV = Math.max(s.kickVariation, s.snareVariation, s.hatVariation);
     if (!this.fillBar && drumV > 0.15 && this.bar % 4 === 3 && this.rng() < drumV * style.fills) this.fillBar = true;
-    if (s.hold) {
-      this.version++;
-      return;
-    }
     const r = this.rng;
-    DRUMS.forEach((d, i) => {
-      const v = this.drumVariation(d.key);
-      const dv = { shift: 0, ghost: new Map<number, number>(), drop: new Set<number>() };
-      const base = euclid(this.pulses(d.key), STEPS, this.rotation(d.key));
-      if (r() < v * 0.9) {
-        // Ghost notes in the gaps; hats get more of them.
-        const n = 1 + Math.floor(r() * (1 + v * (d.key === "hat" ? 4 : 2)));
-        for (let k = 0; k < n; k++) {
-          const step = Math.floor(r() * STEPS);
-          if (!base[step]) dv.ghost.set(step, 0.25 + 0.3 * r());
+    if (!this.held("drums")) {
+      DRUMS.forEach((d, i) => {
+        const v = this.drumVariation(d.key);
+        const dv = { shift: 0, ghost: new Map<number, number>(), drop: new Set<number>() };
+        const len = this.length(d.key);
+        const start = this.rotation(d.key);
+        const base = euclid(this.pulses(d.key), len, start);
+        if (r() < v * 0.9) {
+          // Ghost notes in the gaps; hats get more of them.
+          const n = 1 + Math.floor(r() * (1 + v * (d.key === "hat" ? 4 : 2)));
+          for (let k = 0; k < n; k++) {
+            const pos = Math.floor(r() * len);
+            if (!base[pos]) dv.ghost.set(pos, 0.25 + 0.3 * r());
+          }
         }
-      }
-      if (r() < v * 0.5) {
-        // Leave a hit out, but never the kick on the one.
-        const hits = base.map((on, k) => (on ? k : -1)).filter((k) => k >= 0 && !(d.key === "kick" && k === 0));
-        if (hits.length > 1) dv.drop.add(hits[Math.floor(r() * hits.length)]);
-      }
-      if (v > 0.5 && r() < (v - 0.5) * 0.6) dv.shift = r() < 0.5 ? -1 : 1;
-      this.drumVar[i] = dv;
-    });
-    const bv = s.bassVariation;
-    for (let i = 0; i < STEPS; i++) {
-      if (r() < bv * 0.3) this.bassGate[i] = r();
-      if (r() < bv * 0.35) this.bassPick[i] = r();
-      if (r() < s.chordRhythm * 0.3) this.chordGate[i] = r();
-      if (r() < MELODY_DRIFT * 0.25) this.melodyGate[i] = r();
-      if (r() < MELODY_DRIFT * 0.2) this.degree[i] = Math.max(-8, Math.min(8, this.degree[i] + (r() < 0.5 ? -1 : 1) * (r() < 0.3 ? 2 : 1)));
+        if (r() < v * 0.5) {
+          // Leave a hit out, but never the kick that starts the pattern.
+          const hits = base.map((on, k) => (on ? k : -1)).filter((k) => k >= 0 && !(d.key === "kick" && k === start));
+          if (hits.length > 1) dv.drop.add(hits[Math.floor(r() * hits.length)]);
+        }
+        if (v > 0.5 && r() < (v - 0.5) * 0.6) dv.shift = r() < 0.5 ? -1 : 1;
+        this.drumVar[i] = dv;
+      });
     }
-    if (r() < MELODY_DRIFT * 0.5) this.motif[1 + Math.floor(r() * 3)] += r() < 0.5 ? -1 : 1;
-    if (r() < MELODY_DRIFT * 0.4) this.motifShift[1 + Math.floor(r() * 3)] = [-2, -1, 1, 2, 3][Math.floor(r() * 5)];
-    if (r() < MELODY_DRIFT * 0.4) {
-      const b = Math.floor(r() * 4);
-      const l = Math.max(-5, Math.min(5, this.lyric[b * 4] + (r() < 0.5 ? -1 : 1)));
-      for (let i = 0; i < 4; i++) this.lyric[b * 4 + i] = l;
+    if (!this.held("bass")) {
+      for (let i = 0; i < STEPS; i++) {
+        if (r() < s.bassVariation * 0.3) this.bassGate[i] = r();
+        if (r() < s.bassVariation * 0.35) this.bassPick[i] = r();
+      }
+    }
+    if (!this.held("chords")) {
+      for (let i = 0; i < STEPS; i++) if (r() < s.chordRhythm * 0.3) this.chordGate[i] = r();
+    }
+    if (!this.held("melody")) {
+      for (let i = 0; i < STEPS; i++) {
+        if (r() < MELODY_DRIFT * 0.25) this.melodyGate[i] = r();
+        if (r() < MELODY_DRIFT * 0.2) this.degree[i] = Math.max(-8, Math.min(8, this.degree[i] + (r() < 0.5 ? -1 : 1) * (r() < 0.3 ? 2 : 1)));
+      }
+      if (r() < MELODY_DRIFT * 0.5) this.motif[1 + Math.floor(r() * 3)] += r() < 0.5 ? -1 : 1;
+      if (r() < MELODY_DRIFT * 0.4) this.motifShift[1 + Math.floor(r() * 3)] = [-2, -1, 1, 2, 3][Math.floor(r() * 5)];
+      if (r() < MELODY_DRIFT * 0.4) {
+        const b = Math.floor(r() * 4);
+        const l = Math.max(-5, Math.min(5, this.lyric[b * 4] + (r() < 0.5 ? -1 : 1)));
+        for (let i = 0; i < 4; i++) this.lyric[b * 4 + i] = l;
+      }
     }
     this.version++;
+  }
+
+  /** Whether a part is frozen, by its own Hold or the global one. */
+  held(part: "drums" | "bass" | "chords" | "melody"): boolean {
+    return this.state.hold || this.state[`${part}Hold`];
   }
 
   // ---- Drums ----------------------------------------------------------------
@@ -559,17 +607,30 @@ export class Sequencer {
     return (this.state as unknown as Record<string, number>)[key];
   }
 
-  /** How many euclidean hits a drum track has at its density. */
+  /** How many steps a drum track's pattern has. */
+  length(key: DrumKey): number {
+    return Math.max(1, Math.min(MAX_DRUM_LENGTH, Math.round(this.num(`${key}Length`))));
+  }
+
+  /** How many euclidean hits a drum track has at its density; density is per bar, so longer patterns get more. */
   pulses(key: DrumKey): number {
     const d = this.num(`${key}Density`);
     const max = DRUMS.find((x) => x.key === key)!.max;
-    return d <= 0 ? 0 : Math.max(1, Math.round(d * max));
+    const len = this.length(key);
+    return d <= 0 ? 0 : Math.max(1, Math.min(len, Math.round((d * max * len) / STEPS)));
   }
 
-  /** Where the track's pattern starts: the style's placement plus the user's turn of the ring. */
+  /** Where the track's pattern starts (its Offset). */
   rotation(key: DrumKey): number {
-    const style = STYLES[this.state.style] ?? STYLES.broken;
-    return style.rotate[key] + Math.round(this.num(`${key}Rotate`));
+    return mod(Math.round(this.num(`${key}Rotate`)), this.length(key));
+  }
+
+  /** Which step of its pattern a drum track is on at absolute sixteenth `a`, after its resets. */
+  drumPos(i: number, a: number): number {
+    const key = DRUMS[i].key;
+    const bars = Number((this.state as unknown as Record<string, string>)[`${key}Reset`]) || 0;
+    const since = bars > 0 ? a % (bars * STEPS) : a;
+    return since % this.length(key);
   }
 
   private drumVariation(key: DrumKey): number {
@@ -579,22 +640,28 @@ export class Sequencer {
   /** The bare euclidean pattern of a track, without this bar's variations. */
   basePattern(i: number): boolean[] {
     const d = DRUMS[i];
-    return euclid(this.pulses(d.key), STEPS, this.rotation(d.key));
+    return euclid(this.pulses(d.key), this.length(d.key), this.rotation(d.key));
   }
 
-  drumHit(i: number, step: number, fill = this.fillBar): DrumStep {
+  /**
+   * Whether a track plays at step `pos` of its own pattern. `step` is the
+   * sixteenth within the bar, for accents and fills (which always land at the
+   * end of a bar); -1 leaves fills out, for views of a pattern that isn't a bar long.
+   */
+  drumHit(i: number, pos: number, step: number, fill = this.fillBar): DrumStep {
     const d = DRUMS[i];
     const style = STYLES[this.state.style] ?? STYLES.broken;
     const dv = this.drumVar[i];
-    const base = euclid(this.pulses(d.key), STEPS, this.rotation(d.key) + dv.shift);
+    const base = euclid(this.pulses(d.key), this.length(d.key), this.rotation(d.key) + dv.shift);
     const level = style.level;
     if (fill && step >= 12 && d.key !== "kick" && this.pulses(d.key) > 0) {
       // Rolls build through the last beat.
       const w = FILL_WEIGHT[step - 12] * (d.key === "snare" ? 1 : 0.8);
-      if (base[step] || w > 0.6) return { on: true, velocity: Math.min(1, (0.55 + 0.1 * (step - 12) + 0.2 * w) * level), kind: base[step] ? "base" : "fill" };
+      if (base[pos] || w > 0.6) return { on: true, velocity: Math.min(1, (0.55 + 0.1 * (step - 12) + 0.2 * w) * level), kind: base[pos] ? "base" : "fill" };
     }
-    if (base[step] && !dv.drop.has(step)) return { on: true, velocity: (0.45 + 0.5 * ACCENT[step]) * level, kind: "base" };
-    const ghost = dv.ghost.get(step);
+    const accent = ACCENT[step >= 0 ? step : pos % STEPS];
+    if (base[pos] && !dv.drop.has(pos)) return { on: true, velocity: (0.45 + 0.5 * accent) * level, kind: "base" };
+    const ghost = dv.ghost.get(pos);
     if (ghost !== undefined && this.pulses(d.key) > 0) return { on: true, velocity: ghost * level, kind: "ghost" };
     return { on: false, velocity: 0, kind: "off" };
   }
@@ -818,6 +885,7 @@ export class Sequencer {
   stop(): void {
     this.playing = false;
     this.current = -1;
+    this.drumCurrent = DRUMS.map(() => -1);
     this.queue = [];
     this.chordIndex = 0;
     window.clearInterval(this.timer);
@@ -845,9 +913,10 @@ export class Sequencer {
       const t = this.nextTime + (step % 2 === 1 ? s.swing * len * 0.5 : 0);
       const events: NoteEvent[] = [];
 
+      const drumSteps = DRUMS.map((_, i) => this.drumPos(i, a));
       if (s.drumsOn) {
         DRUMS.forEach((d, i) => {
-          const hit = this.drumHit(i, step);
+          const hit = this.drumHit(i, drumSteps[i], step);
           if (!hit.on) return;
           events.push({ note: d.note, velocity: hit.velocity, role: d.role, x: 0.5, source: "sequencer" });
           if (s.sound) this.audio.hit(d.role, d.note, hit.velocity, t);
@@ -889,7 +958,7 @@ export class Sequencer {
         if (s.sound) this.audio.hit("tone", note, velocity, t, len * hold * 0.95);
       }
 
-      this.queue.push({ time: t, step, chord: this.schedChord, events });
+      this.queue.push({ time: t, step, drumSteps, chord: this.schedChord, events });
       this.nextTime += len;
       this.abs++;
     }
@@ -903,6 +972,7 @@ export class Sequencer {
     while (this.queue.length && this.queue[0].time <= ctx.currentTime) {
       const q = this.queue.shift()!;
       this.current = q.step;
+      this.drumCurrent = q.drumSteps;
       if (q.chord !== this.chordIndex) {
         this.chordIndex = q.chord;
         this.version++;
