@@ -19,6 +19,12 @@ const statsEl = $<HTMLElement>("stats");
 const randomizeBtn = $<HTMLButtonElement>("randomize");
 
 const MAX_STEPS_PER_FRAME = 8;
+/**
+ * Milliseconds of simulation per frame before the loop stops catching up.
+ * Without it a heavy model that misses one frame runs extra steps the next,
+ * which makes that frame later still, and it spirals down to a few fps.
+ */
+const STEP_BUDGET_MS = 12;
 
 let def: ModelDefinition;
 let model: SimulationModel;
@@ -34,6 +40,7 @@ let running = true;
 let accumulator = 0;
 let lastTime = performance.now();
 let fps = 0;
+let statsShown = 0;
 /** The global colour filter currently on the canvas. */
 let canvasFilterShown = "";
 
@@ -201,12 +208,16 @@ function frame(now: number): void {
     // The global Speed control runs the clock faster or slower for every model.
     accumulator += elapsed * (studio.globals().speed as number);
     let steps = 0;
-    while (accumulator >= dt && steps < MAX_STEPS_PER_FRAME) {
+    const start = performance.now();
+    while (accumulator >= dt) {
+      if (steps === MAX_STEPS_PER_FRAME || (steps > 0 && performance.now() - start > STEP_BUDGET_MS)) {
+        accumulator = 0; // drop time rather than spiral
+        break;
+      }
       model.step(dt, effective, music);
       accumulator -= dt;
       steps++;
     }
-    if (steps === MAX_STEPS_PER_FRAME) accumulator = 0; // drop time rather than spiral
   }
 
   if (!def.paintsBackground) {
@@ -217,8 +228,12 @@ function frame(now: number): void {
   const filter = studio.canvasFilter();
   if (filter !== canvasFilterShown) canvas.style.filter = canvasFilterShown = filter;
 
-  const extra = model.stats?.();
-  statsEl.textContent = `${Math.round(fps)} fps${extra ? ` · ${extra}` : ""}`;
+  // A few times a second is plenty, and saves a sidebar re-layout every frame.
+  if (now - statsShown > 250) {
+    statsShown = now;
+    const extra = model.stats?.();
+    statsEl.textContent = `${Math.round(fps)} fps${extra ? ` · ${extra}` : ""}`;
+  }
   requestAnimationFrame(frame);
 }
 

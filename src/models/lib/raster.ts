@@ -22,9 +22,15 @@ export class Raster {
     this.pixels = new Uint32Array(this.image.data.buffer);
   }
 
+  /** Copy `pixels` onto the buffer's canvas and return it, to draw it yourself. */
+  update(): HTMLCanvasElement {
+    this.ctx.putImageData(this.image, 0, 0);
+    return this.canvas;
+  }
+
   /** Blit the buffer to `g`, stretched to `w` x `h` CSS pixels. */
   draw(g: CanvasRenderingContext2D, w: number, h: number, smooth = false, x = 0, y = 0): void {
-    this.ctx.putImageData(this.image, 0, 0);
+    this.update();
     const prev = g.imageSmoothingEnabled;
     g.imageSmoothingEnabled = smooth;
     g.drawImage(this.canvas, x, y, w, h);

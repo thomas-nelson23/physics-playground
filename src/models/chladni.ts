@@ -1,6 +1,7 @@
 import type { ModelDefinition, MusicFrame, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { Feedback, applyFeedback, colourParam, feedbackParams, hueToward, schemeHue } from "./lib/visual";
 import { gravityAt, gravityModeParam, isUniform } from "./lib/gravity";
+import { Raster, hsl, rgb } from "./lib/raster";
 
 /**
  * Vibration modes of a square plate, (n, m, sign), ordered roughly by pitch.
@@ -54,6 +55,7 @@ class CymaticsSim implements SimulationModel {
   private fb = new Feedback();
   private stepped = false;
   private time = 0;
+  private raster: Raster | null = null;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -253,20 +255,46 @@ class CymaticsSim implements SimulationModel {
     const scheme = p.colours as string;
     this.hue = hueToward(this.hue, scheme === "notes" ? m.hue : schemeHue(scheme, 0.5, m.hue, m.beats), 0.08);
     // Settled sand on the still lines glows in the main colour; sand still bouncing glows a second colour.
-    const still = new Path2D(), moving = new Path2D();
-    const r = (p.grainSize as number) * (1 + Math.min(1, m.treble) * 0.5);
+    // Grains are written straight into a pixel buffer the size of the plate: thousands of tiny
+    // rectangles are slow to fill in software-rendered webviews, one image blit is not.
+    // Device pixels on high-DPI screens, so grains stay sharp, up to a size that stays cheap to clear and blit.
+    const scale = Math.min(g.getTransform().a || 1, 1400 / s);
+    const size = Math.max(1, Math.round(s * scale));
+    if (!this.raster || this.raster.width !== size) this.raster = new Raster(size, size);
+    const px = this.raster.pixels;
+    px.fill(0);
+    const r = (p.grainSize as number) * (1 + Math.min(1, m.treble) * 0.5) * scale;
+    const block = Math.max(1, Math.round(r));
+    // A block smaller or bigger than the grain is dimmed or brightened to keep the same total light.
+    const cover = Math.min(1, (r * r) / (block * block));
+    const light = (55 + Math.min(1, m.energy) * 15) / 100;
+    const stillColour = this.colour(this.hue, 0.85, light, 0.9 * cover);
+    const movingColour = this.colour((this.hue + (p.secondHue as number)) % 360, 0.8, light - 0.1, 0.45 * cover);
     const { gx, gy, amp } = this;
-    for (let i = 0; i < gx.length; i++) {
-      const path = amp[i] < 0.25 ? still : moving;
-      path.rect(ox + gx[i] * s - r / 2, oy + gy[i] * s - r / 2, r, r);
+    const max = size - block, off = (block - 1) / 2;
+    // Bouncing sand first, so settled sand on top of it wins.
+    for (let pass = 0; pass < 2; pass++) {
+      const colour = pass === 0 ? movingColour : stillColour;
+      for (let i = 0; i < gx.length; i++) {
+        if ((amp[i] < 0.25) !== (pass === 1)) continue;
+        let x0 = Math.round(gx[i] * size - off), y0 = Math.round(gy[i] * size - off);
+        x0 = x0 < 0 ? 0 : x0 > max ? max : x0;
+        y0 = y0 < 0 ? 0 : y0 > max ? max : y0;
+        for (let y = y0; y < y0 + block; y++) {
+          const row = y * size;
+          for (let x = x0; x < x0 + block; x++) px[row + x] = colour;
+        }
+      }
     }
     g.globalCompositeOperation = "lighter";
-    const light = 55 + Math.min(1, m.energy) * 15;
-    g.fillStyle = `hsla(${this.hue} 85% ${light}% / 0.9)`;
-    g.fill(still);
-    g.fillStyle = `hsla(${(this.hue + (p.secondHue as number)) % 360} 80% ${light - 10}% / 0.45)`;
-    g.fill(moving);
+    this.raster.draw(g, s, s, false, ox, oy);
     g.globalCompositeOperation = "source-over";
+  }
+
+  /** A packed pixel for `lighter` blending: the colour pre-scaled by its opacity. */
+  private colour(h: number, sat: number, light: number, alpha: number): number {
+    const [r, g, b] = hsl(h, sat, Math.max(0, Math.min(1, light)));
+    return rgb(r * alpha, g * alpha, b * alpha);
   }
 
   stats(): string {

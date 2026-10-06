@@ -2,7 +2,7 @@
 
 A music-driven visualizer for the desktop. Each model is a physics or algorithmic system tuned to make striking visuals that move with the music: a built-in generative sequencer, a MIDI controller, or a song drives every model through its notes, its spectrum and loudness, macros and modulation. Pick a model, tweak it with sliders, and poke at it with the mouse.
 
-![Orbit rings playing along with the sequencer](docs/screenshot.png)
+![The visualizer playing along with the sequencer](docs/screenshot.png)
 
 Built with [Tauri 2](https://tauri.app) (Rust shell, native webview) and TypeScript + Canvas 2D. macOS is the first target; Linux builds from the same code (`.deb`, AppImage, and a pacman package for Arch-based distros like CachyOS).
 
@@ -11,9 +11,8 @@ Built with [Tauri 2](https://tauri.app) (Rust shell, native webview) and TypeScr
 | Model | What the music does | Interaction |
 | --- | --- | --- |
 | Particle bloom | A ring of light that breathes with the bass and bulges into the shape of the spectrum; kicks send shockwaves, notes and snares throw sparks | Click for sparks, hold to pull, right-drag to push |
-| Orbit rings | Planets trace glowing rings; each is tuned to a note and flares when it plays, orbits glow with their slice of the spectrum, the sun's corona is the waveform | Drag to launch a planet, right-drag for a star |
 | Murmuration | A flock of light streaks chases each note and takes its colour, which spreads bird to bird; kicks scatter it, snares spin vortices | Hold to attract, right-click or Shift to scatter |
-| Silk curtain | The spectrum lifts the silk like an equaliser; kicks blow gusts, notes pluck it and dye it | Drag to pull the silk, right-drag to slice it (it heals) |
+| Fabric | The spectrum lifts the fabric like an equaliser; kicks blow gusts, notes pluck it and dye it. Each side (top, bottom, left, right) can be pinned on its own | Drag to pull the fabric, right-drag to slice it (it heals) |
 | Living ink | Reaction–diffusion that grows where the spectrum is loud; notes seed blooms, the palette follows the melody | Drag to seed, right-drag to wipe |
 | Cymatics | Glowing sand on a vibrating plate morphs to a new figure with every note; the round plate draws turning mandalas | Drag to stir the sand |
 
@@ -164,8 +163,7 @@ src/
     types.ts         the model interface
     registry.ts      list of available models
     particles.ts     Particle bloom: a spectrum ring of glowing particles
-    orbits.ts        Orbit rings: stars and planets (leapfrog integrator)
-    cloth.ts         Silk curtain: Verlet cloth lifted by the spectrum
+    cloth.ts         Fabric: Verlet cloth lifted by the spectrum
     boids.ts         Murmuration: flocking light streaks
     reaction.ts      Living ink: Gray-Scott reaction-diffusion
     chladni.ts       Cymatics: sand figures on a vibrating plate
