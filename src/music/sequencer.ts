@@ -382,7 +382,8 @@ export class Sequencer {
   /** Epic's key change, in semitones, for this pass of the progression. */
   lift = 0;
   private rng: () => number;
-  private drumVar: { shift: number; ghost: Map<number, number>; drop: Set<number> }[] = [];
+  /** This bar's variations per drum: `nudge` plays every hit a little early or late, as a share of a sixteenth. */
+  private drumVar: { nudge: number; ghost: Map<number, number>; drop: Set<number> }[] = [];
   private bassGate: number[] = [];
   private bassPick: number[] = [];
   private chordGate: number[] = [];
@@ -455,7 +456,7 @@ export class Sequencer {
 
   private generate(): void {
     const r = this.rng;
-    this.drumVar = DRUMS.map(() => ({ shift: 0, ghost: new Map(), drop: new Set() }));
+    this.drumVar = DRUMS.map(() => ({ nudge: 0, ghost: new Map(), drop: new Set() }));
     this.bassGate = Array.from({ length: STEPS }, r);
     this.bassPick = Array.from({ length: STEPS }, r);
     this.chordGate = Array.from({ length: STEPS }, r);
@@ -550,7 +551,7 @@ export class Sequencer {
     if (!this.held("drums")) {
       DRUMS.forEach((d, i) => {
         const v = this.drumVariation(d.key);
-        const dv = { shift: 0, ghost: new Map<number, number>(), drop: new Set<number>() };
+        const dv = { nudge: 0, ghost: new Map<number, number>(), drop: new Set<number>() };
         const len = this.length(d.key);
         const start = this.rotation(d.key);
         const base = euclid(this.pulses(d.key), len, start);
@@ -567,7 +568,8 @@ export class Sequencer {
           const hits = base.map((on, k) => (on ? k : -1)).filter((k) => k >= 0 && !(d.key === "kick" && k === start));
           if (hits.length > 1) dv.drop.add(hits[Math.floor(r() * hits.length)]);
         }
-        if (v > 0.5 && r() < (v - 0.5) * 0.6) dv.shift = r() < 0.5 ? -1 : 1;
+        // A slight push or drag in timing, never more than a tenth of a sixteenth.
+        if (v > 0.3 && r() < v * 0.5) dv.nudge = (r() < 0.5 ? -1 : 1) * (0.02 + 0.08 * v * r());
         this.drumVar[i] = dv;
       });
     }
@@ -652,7 +654,7 @@ export class Sequencer {
     const d = DRUMS[i];
     const style = STYLES[this.state.style] ?? STYLES.broken;
     const dv = this.drumVar[i];
-    const base = euclid(this.pulses(d.key), this.length(d.key), this.rotation(d.key) + dv.shift);
+    const base = euclid(this.pulses(d.key), this.length(d.key), this.rotation(d.key));
     const level = style.level;
     if (fill && step >= 12 && d.key !== "kick" && this.pulses(d.key) > 0) {
       // Rolls build through the last beat.
@@ -919,7 +921,7 @@ export class Sequencer {
           const hit = this.drumHit(i, drumSteps[i], step);
           if (!hit.on) return;
           events.push({ note: d.note, velocity: hit.velocity, role: d.role, x: 0.5, source: "sequencer" });
-          if (s.sound) this.audio.hit(d.role, d.note, hit.velocity, t);
+          if (s.sound) this.audio.hit(d.role, d.note, hit.velocity, Math.max(ctx.currentTime, t + this.drumVar[i].nudge * len));
         });
       }
 

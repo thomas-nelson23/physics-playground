@@ -20,13 +20,15 @@ Shift works in place of right-click everywhere. Most models share a **Look** gro
 
 Keyboard: `Space` play/pause the simulation, `Enter` play/stop the sequencer, `R` reset, `.` single step while paused.
 
+The window is laid out like Photoshop: an options bar across the top (model, transport, Randomize, show or hide the music panel), the canvas as the document in the middle, and foldable panels down the right for the model, its **Parameters**, the **Global controls** that apply to every model (colour, gravity, speed, motion, size) and the model's **Macros**.
+
 ## Music
 
 The panel under the canvas has four tabs.
 
 - **Sequencer**: a generative band in five sections. Instead of programming steps, you steer each part and it writes and evolves the music itself.
   - **Global**: tempo, style (broken beat, four on the floor, half-time, ambient), swing, scale and root, plus synth sound, volume, **New idea** (fresh patterns and progression), **Fill** and **Hold** (freeze everything).
-  - **Drums**: a euclidean sequencer drawn as three rings (kick inside, snare, hats outside). Each track's **Density** sets how many hits are spread evenly round the bar and **Variation** how much each bar strays with ghost notes, dropped hits and nudges. Drag a ring round to turn its pattern; double-click to put it back. Picking a global style resets the rings to that style's beat.
+  - **Drums**: a euclidean sequencer drawn as three rings (kick inside, snare, hats outside). Each track's **Density** sets how many hits are spread evenly round the bar and **Variation** how much each bar strays with ghost notes, dropped hits and nudges (hits landing a hair early or late). **Steps** sets how many sixteenths the pattern has, **Offset** turns it round and **Reset** brings it back to its start every so many bars. Drag a ring round to turn its pattern; double-click to put it back. Picking a global style resets the rings to that style's beat.
   - **Bass**: a style (root pulse, off-beat, octave bounce, syncopated, walking, drone), **Density**, **Range** (root only, then octave, fifth, chord tones and passing notes) and **Variation**. It follows the chords.
   - **Chords**: jazz, pop, dance or epic, each cycling through progressions typical of the style. **Change every** sets how long each chord lasts, **Variation** switches progressions and swaps in style-typical substitutes (tritone subs, relative chords, sus and added notes), and **Rhythm density** and **Rhythm variation** shape the comping. Epic is the wildcard: cinematic progressions with chromatic jumps and power chords, doubled an octave each side, and now and then it lifts the whole song up a step for a pass.
   - **Melody**: a style (wander, arpeggio, motif, lyrical), **Range**, **Density**, and **Groove**, which adds syncopation, clips notes shorter and makes the second half of the bar answer the first. Strong beats lean on chord tones.
