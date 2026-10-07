@@ -4,6 +4,9 @@ import { Raster, hsl, palette } from "./lib/raster";
 import { Feedback, applyFeedback, feedbackParams, hueToward } from "./lib/visual";
 import { gravityAt, gravityModeParam, isUniform } from "./lib/gravity";
 
+/** Milliseconds per frame the reaction may spend iterating; see `step`. */
+const ITERATION_BUDGET_MS = 7;
+
 /** Feed and kill rates for well-known Gray–Scott regimes. */
 const PRESETS: Record<string, [number, number]> = {
   coral: [0.0545, 0.062],
@@ -54,6 +57,9 @@ class ReactionSim implements SimulationModel {
   private fb = new Feedback();
   private stepped = false;
   private time = 0;
+  /** Milliseconds spent iterating since the last frame was drawn. */
+  private spent = 0;
+  private bloomLayer: HTMLCanvasElement | null = null;
 
   reset(view: Viewport, p: ParamValues): void {
     this.cell = p.cellSize as number;
@@ -127,28 +133,48 @@ class ReactionSim implements SimulationModel {
     // about 1.25 (less once the reaction terms are added), so cap it at 1.05.
     const scale = Math.min(1.05, Math.max(0.05, (p.diffusion as number) || 1));
     const dA = 1.0 * scale, dB = 0.5 * scale;
+    const colShift = this.colShift;
+    // Big screens can't afford every requested iteration each frame; growth slows
+    // down instead of the frame rate. The budget is per drawn frame (the host may
+    // step more than once between frames), and the first step of a frame always
+    // gets at least one iteration.
+    const start = performance.now();
+    const deadline = start + ITERATION_BUDGET_MS - this.spent;
+    let done = 0;
     for (let it = 0; it < iters; it++) {
+      if ((it > 0 || this.spent > 0) && performance.now() > deadline) break;
       const a = this.a, b = this.b, na = this.na, nb = this.nb;
       for (let y = 0; y < h; y++) {
         const up = ((y - 1 + h) % h) * w, mid = y * w, down = ((y + 1) % h) * w;
+        // Walk the row carrying the left and centre columns in locals, so each
+        // cell only loads its right-hand column (a big win over 18 array reads).
+        let aul = a[up + w - 1], aml = a[mid + w - 1], adl = a[down + w - 1], auc = a[up], amc = a[mid], adc = a[down];
+        let bul = b[up + w - 1], bml = b[mid + w - 1], bdl = b[down + w - 1], buc = b[up], bmc = b[mid], bdc = b[down];
         for (let x = 0; x < w; x++) {
-          const l = x === 0 ? w - 1 : x - 1, r = x === w - 1 ? 0 : x + 1;
-          const i = mid + x;
+          const r = x === w - 1 ? 0 : x + 1;
+          const aur = a[up + r], amr = a[mid + r], adr = a[down + r];
+          const bur = b[up + r], bmr = b[mid + r], bdr = b[down + r];
           // 9-point Laplacian: 0.2 for edges, 0.05 for corners.
-          const lapA = 0.2 * (a[up + x] + a[down + x] + a[mid + l] + a[mid + r])
-            + 0.05 * (a[up + l] + a[up + r] + a[down + l] + a[down + r]) - a[i];
-          const lapB = 0.2 * (b[up + x] + b[down + x] + b[mid + l] + b[mid + r])
-            + 0.05 * (b[up + l] + b[up + r] + b[down + l] + b[down + r]) - b[i];
-          const abb = a[i] * b[i] * b[i];
-          const f = Math.max(0, feed[i] + df), k = Math.max(0, kill[i] + dk + this.colShift[x]);
-          na[i] = a[i] + dA * lapA - abb + f * (1 - a[i]);
-          nb[i] = b[i] + dB * lapB + abb - (k + f) * b[i];
+          const lapA = 0.2 * (auc + adc + aml + amr) + 0.05 * (aul + aur + adl + adr) - amc;
+          const lapB = 0.2 * (buc + bdc + bml + bmr) + 0.05 * (bul + bur + bdl + bdr) - bmc;
+          const i = mid + x;
+          const abb = amc * bmc * bmc;
+          let f = feed[i] + df;
+          if (f < 0) f = 0;
+          let k = kill[i] + dk + colShift[x];
+          if (k < 0) k = 0;
+          na[i] = amc + dA * lapA - abb + f * (1 - amc);
+          nb[i] = bmc + dB * lapB + abb - (k + f) * bmc;
+          aul = auc; auc = aur; aml = amc; amc = amr; adl = adc; adc = adr;
+          bul = buc; buc = bur; bml = bmc; bmc = bmr; bdl = bdc; bdc = bdr;
         }
       }
       this.a = na; this.na = a;
       this.b = nb; this.nb = b;
+      done++;
     }
-    this.steps += iters;
+    this.steps += done;
+    this.spent += performance.now() - start;
   }
 
   /**
@@ -217,6 +243,7 @@ class ReactionSim implements SimulationModel {
   }
 
   render(g: CanvasRenderingContext2D, view: Viewport, p: ParamValues, m: MusicFrame): void {
+    this.spent = 0;
     if (!this.raster) return;
     applyFeedback(this.fb, g, view, p, this.stepped);
     this.stepped = false;
@@ -237,24 +264,35 @@ class ReactionSim implements SimulationModel {
       px[i] = lut[(v * 255) | 0];
     }
     const W = this.w * this.cell, H = this.h * this.cell;
-    // With afterglow the ink is laid over its own fading echoes instead of replacing them.
-    g.globalAlpha = 1 - Math.min(0.9, (p.afterglow as number) * 0.9);
-    this.raster.draw(g, W, H, true);
-    g.globalAlpha = 1;
-    // A soft bloom over the top that swells with the bass.
+    // A soft bloom over the top that swells with the bass. It is layered onto the ink at grid
+    // resolution, so the screen gets one stretched image instead of two full-screen blends.
+    const ink = this.raster.update();
+    let image = ink;
     const bloom = (p.bloom as number) * (0.25 + Math.min(1.5, m.bass) * 0.75);
     if (bloom > 0.02) {
+      if (!this.bloomLayer || this.bloomLayer.width !== this.w || this.bloomLayer.height !== this.h) {
+        this.bloomLayer = document.createElement("canvas");
+        this.bloomLayer.width = this.w;
+        this.bloomLayer.height = this.h;
+      }
+      const bg = this.bloomLayer.getContext("2d")!;
       const s = 1.04 + Math.min(1.5, m.bass) * 0.04;
-      g.globalCompositeOperation = "lighter";
-      g.globalAlpha = Math.min(1, bloom * 0.22);
-      g.save();
-      g.translate(W / 2, H / 2);
-      g.scale(s, s);
-      this.raster.draw(g, W, H, true, -W / 2, -H / 2);
-      g.restore();
-      g.globalAlpha = 1;
-      g.globalCompositeOperation = "source-over";
+      bg.globalCompositeOperation = "copy";
+      bg.globalAlpha = 1;
+      bg.setTransform(1, 0, 0, 1, 0, 0);
+      bg.drawImage(ink, 0, 0);
+      bg.globalCompositeOperation = "lighter";
+      bg.globalAlpha = Math.min(1, bloom * 0.22);
+      bg.imageSmoothingEnabled = true;
+      bg.setTransform(s, 0, 0, s, (this.w * (1 - s)) / 2, (this.h * (1 - s)) / 2);
+      bg.drawImage(ink, 0, 0);
+      image = this.bloomLayer;
     }
+    // With afterglow the ink is laid over its own fading echoes instead of replacing them.
+    g.globalAlpha = 1 - Math.min(0.9, (p.afterglow as number) * 0.9);
+    g.imageSmoothingEnabled = true;
+    g.drawImage(image, 0, 0, W, H);
+    g.globalAlpha = 1;
   }
 
   stats(): string {

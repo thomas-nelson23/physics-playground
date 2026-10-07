@@ -1,6 +1,5 @@
 import type { ModelDefinition } from "./types";
 import { particles } from "./particles";
-import { orbits } from "./orbits";
 import { cloth } from "./cloth";
 import { boids } from "./boids";
 import { reaction } from "./reaction";
@@ -12,7 +11,7 @@ import { chladni } from "./chladni";
  * groups by category in the order categories first appear here.
  */
 export const models: ModelDefinition[] = [
-  particles, orbits, boids,
+  particles, boids,
   cloth, reaction, chladni,
 ];
 

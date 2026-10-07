@@ -8,6 +8,8 @@ const SPARK_LIFE = 2.2;
 const MAX_SPARKS = 2500;
 /** Coarse grid for mutual gravity: each particle feels every cell's mass instead of every other particle. */
 const MESH = 12;
+/** Resolution of the glow layer relative to the screen. */
+const GLOW_SCALE = 0.5;
 
 interface Shock {
   x: number;
@@ -47,6 +49,8 @@ class ParticleBloom implements SimulationModel {
   private scheme = "notes";
   private beats = 0;
   private noteHueNow = 210;
+  private layer: HTMLCanvasElement | null = null;
+  private layerCtx: CanvasRenderingContext2D | null = null;
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -277,16 +281,33 @@ class ParticleBloom implements SimulationModel {
   render(g: CanvasRenderingContext2D, view: Viewport, p: ParamValues, m: MusicFrame): void {
     applyFeedback(this.fb, g, view, p, this.stepped);
     this.stepped = false;
-    g.globalCompositeOperation = "lighter";
+    // The glows are soft, so they are drawn at half resolution on their own layer and then
+    // stretched over the canvas in one go: a quarter of the pixels to blend, which is most
+    // of the cost of thousands of sprites in a software-rendered webview.
+    const scale = (g.getTransform().a || 1) * GLOW_SCALE;
+    const lw = Math.max(1, Math.round(view.width * scale)), lh = Math.max(1, Math.round(view.height * scale));
+    if (!this.layer || this.layer.width !== lw || this.layer.height !== lh) {
+      this.layer = document.createElement("canvas");
+      this.layer.width = lw;
+      this.layer.height = lh;
+      this.layerCtx = this.layer.getContext("2d");
+    }
+    const lg = this.layerCtx!;
+    lg.setTransform(1, 0, 0, 1, 0, 0);
+    lg.clearRect(0, 0, lw, lh);
+    lg.setTransform(scale, 0, 0, scale, 0, 0);
+    lg.globalCompositeOperation = "lighter";
     const size = (p.size as number) * (1 + Math.min(1.5, m.energy) * 0.35 + m.pulse * 0.15);
     const { x, y, hue, life, flare } = this;
     for (let i = 0; i < this.n; i++) {
       const fade = life[i] < 0 ? 0.55 : Math.min(1, life[i] / (SPARK_LIFE * 0.4));
       const s = size * (6 + flare[i] * 10) * (life[i] < 0 ? 1 : 0.8 + fade * 0.4);
-      g.globalAlpha = Math.min(1, fade + flare[i] * 0.5);
-      g.drawImage(glowSprite(hue[i]), x[i] - s, y[i] - s, s * 2, s * 2);
+      lg.globalAlpha = Math.min(1, fade + flare[i] * 0.5);
+      lg.drawImage(glowSprite(hue[i], 90, s * 2 * scale), x[i] - s, y[i] - s, s * 2, s * 2);
     }
-    g.globalAlpha = 1;
+    lg.globalAlpha = 1;
+    g.globalCompositeOperation = "lighter";
+    g.drawImage(this.layer, 0, 0, view.width, view.height);
     for (const s of this.shocks) {
       g.beginPath();
       g.arc(s.x, s.y, s.r, 0, Math.PI * 2);

@@ -91,25 +91,31 @@ export function applyFeedback(fb: Feedback, g: CanvasRenderingContext2D, view: V
 
 /**
  * Soft round glow sprites, one per 10° of hue, drawn with additive blending
- * so overlapping lights add up to white-hot cores.
+ * so overlapping lights add up to white-hot cores. Each hue is cached at a
+ * few sizes: shrinking a big sprite to a few pixels on every draw is slow in
+ * software-rendered webviews, so `px` (the size it will be drawn at, in
+ * device pixels) picks the nearest cached size at or above it.
  */
 const sprites = new Map<number, HTMLCanvasElement>();
+const SPRITE_SIZES = [8, 16, 32, 64];
 
-export function glowSprite(hue: number, sat = 90): HTMLCanvasElement {
-  const key = Math.round((((hue % 360) + 360) % 360) / 10) * 1000 + sat;
+export function glowSprite(hue: number, sat = 90, px = 64): HTMLCanvasElement {
+  const dim = SPRITE_SIZES.find((d) => d >= px) ?? SPRITE_SIZES[SPRITE_SIZES.length - 1];
+  const h = Math.round((((hue % 360) + 360) % 360) / 10) * 10 % 360;
+  const key = (h * 1000 + sat) * 100 + dim;
   let s = sprites.get(key);
   if (s) return s;
   s = document.createElement("canvas");
-  s.width = s.height = 64;
+  s.width = s.height = dim;
   const c = s.getContext("2d")!;
-  const h = Math.round((((hue % 360) + 360) % 360) / 10) * 10;
-  const grad = c.createRadialGradient(32, 32, 0, 32, 32, 32);
+  const r = dim / 2;
+  const grad = c.createRadialGradient(r, r, 0, r, r, r);
   grad.addColorStop(0, `hsla(${h} ${sat}% 92% / 1)`);
   grad.addColorStop(0.18, `hsla(${h} ${sat}% 70% / 0.75)`);
   grad.addColorStop(0.5, `hsla(${h} ${sat}% 55% / 0.18)`);
   grad.addColorStop(1, `hsla(${h} ${sat}% 50% / 0)`);
   c.fillStyle = grad;
-  c.fillRect(0, 0, 64, 64);
+  c.fillRect(0, 0, dim, dim);
   sprites.set(key, s);
   return s;
 }

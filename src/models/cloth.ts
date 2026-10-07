@@ -1,17 +1,27 @@
-import type { ModelDefinition, MusicFrame, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
+import type { ModelDefinition, MusicFrame, ParamSpec, NoteEvent, ParamValues, PointerInput, SimulationModel, Viewport } from "./types";
 import { gravityAt, gravityModeParam, isUniform, uniformDir } from "./lib/gravity";
 import { noteHue } from "./lib/music";
 import { Feedback, applyFeedback, colourParam, feedbackParams, schemeHue } from "./lib/visual";
 
-/** Silk is drawn in this many hues times this many shades, one path each, to keep fills cheap. */
+/** The fabric is drawn in this many hues times this many shades, one path each, to keep fills cheap. */
 const HUES = 18;
 const SHADES = 8;
 
+/** How each side of the fabric can be held. */
+const ANCHOR_OPTIONS = [
+  { value: "free", label: "Free" },
+  { value: "edge", label: "Whole edge" },
+  { value: "rings", label: "Rings (every few points)" },
+  { value: "ends", label: "Just the corners" },
+];
+const SIDES = ["Top", "Bottom", "Left", "Right"] as const;
+
 /**
- * A silk curtain that dances to the music: the spectrum lifts its columns
+ * A sheet of fabric that dances to the music: the spectrum lifts its columns
  * like an equaliser (bass on the left, treble on the right), kicks blow
- * gusts through it, and notes pluck it and dye it their colour. Underneath
- * it is a Verlet cloth with distance constraints; torn links heal back.
+ * gusts through it, and notes pluck it and dye it their colour. Each side
+ * can be anchored on its own. Underneath it is a Verlet cloth with distance
+ * constraints; torn links heal back.
  */
 class ClothSim implements SimulationModel {
   private n = 0;
@@ -20,6 +30,11 @@ class ClothSim implements SimulationModel {
   private px = new Float64Array(0);
   private py = new Float64Array(0);
   private pinned = new Uint8Array(0);
+  /** Where each point hangs at rest; anchored points are held there. */
+  private homeX = new Float64Array(0);
+  private homeY = new Float64Array(0);
+  /** The anchor settings `pinned` was built from, to notice when they change. */
+  private anchorKey = "";
   private ca = new Int32Array(0);
   private cb = new Int32Array(0);
   private rest = 0;
@@ -61,14 +76,12 @@ class ClothSim implements SimulationModel {
         const k = j * cols + i;
         this.x[k] = left + i * spacing;
         this.y[k] = top + j * spacing;
-        if (j === 0) {
-          const pins = p.pins;
-          if (pins === "edge") this.pinned[k] = 1;
-          else if (pins === "corners") this.pinned[k] = i === 0 || i === cols - 1 ? 1 : 0;
-          else if (pins === "curtain") this.pinned[k] = i % 6 === 0 || i === cols - 1 ? 1 : 0;
-        }
       }
     }
+    this.homeX = this.x.slice();
+    this.homeY = this.y.slice();
+    this.anchorKey = "";
+    this.updateAnchors(p);
     this.px = this.x.slice();
     this.py = this.y.slice();
     const a: number[] = [], b: number[] = [];
@@ -95,13 +108,40 @@ class ClothSim implements SimulationModel {
     this.view = view;
   }
 
+  /**
+   * Rebuild which points are held from the four side settings. Changing them
+   * doesn't restart the scene: newly anchored points glide back to their
+   * place (see `step`) and released ones simply fall.
+   */
+  private updateAnchors(p: ParamValues): void {
+    const modes = SIDES.map((side) => (p[`anchor${side}`] as string) ?? "free");
+    const key = modes.join();
+    if (key === this.anchorKey) return;
+    this.anchorKey = key;
+    const [top, bottom, left, right] = modes;
+    const { cols, rows, pinned } = this;
+    pinned.fill(0);
+    // Along a side `len` points long, is point `t` held?
+    const held = (mode: string, t: number, len: number) =>
+      mode === "edge" || (mode === "rings" && (t % 6 === 0 || t === len - 1)) || (mode === "ends" && (t === 0 || t === len - 1));
+    for (let i = 0; i < cols; i++) {
+      if (held(top, i, cols)) pinned[i] = 1;
+      if (held(bottom, i, cols)) pinned[(rows - 1) * cols + i] = 1;
+    }
+    for (let j = 0; j < rows; j++) {
+      if (held(left, j, rows)) pinned[j * cols] = 1;
+      if (held(right, j, rows)) pinned[j * cols + cols - 1] = 1;
+    }
+  }
+
   step(dt: number, p: ParamValues, m: MusicFrame): void {
-    const { x, y, px, py, pinned, n } = this;
+    this.updateAnchors(p);
+    const { x, y, px, py, pinned, n, homeX, homeY } = this;
     this.stepped = true;
     this.time += dt;
     const gravity = p.gravity as number;
     // The spectrum lifts each column from below, most at the hem: bass on the left, treble on the right.
-    // Both are shares of gravity, so the silk rises toward weightless but only flies off at the extremes.
+    // Both are shares of gravity, so the fabric rises toward weightless but only flies off at the extremes.
     const lift = (p.spectrumLift as number) * 0.45 * gravity;
     const billow = (p.billow as number) * Math.min(1.5, m.bass) * 0.25 * gravity;
     const spec = m.spectrum;
@@ -115,8 +155,16 @@ class ClothSim implements SimulationModel {
     const wind = (p.wind as number) * (0.6 + 0.4 * Math.sin(this.time * 1.3) + 0.2 * Math.sin(this.time * 3.7));
     const damp = 0.995;
     const dt2 = dt * dt;
+    const settle = Math.min(1, dt * 8);
     for (let k = 0; k < n; k++) {
-      if (pinned[k]) continue;
+      if (pinned[k]) {
+        // Anchored points ease back to their place (they only move when an anchor was just added).
+        x[k] += (homeX[k] - x[k]) * settle;
+        y[k] += (homeY[k] - y[k]) * settle;
+        px[k] = x[k];
+        py[k] = y[k];
+        continue;
+      }
       // Wind gusts vary down the cloth so it ripples instead of swinging rigidly.
       const gust = wind * (0.7 + 0.3 * Math.sin(y[k] * 0.02 + this.time * 2));
       const vx = (x[k] - px[k]) * damp, vy = (y[k] - py[k]) * damp;
@@ -281,7 +329,7 @@ class ClothSim implements SimulationModel {
     const scheme = p.colours as string;
     const restArea = rest * rest;
     const glow = 0.5 + Math.min(1, m.level) * 0.3 + m.kick * 0.15;
-    // Each quad is shaded by how bunched up it is (folds go dark, stretched silk catches the light).
+    // Each quad is shaded by how bunched up it is (folds go dark, stretched fabric catches the light).
     const paths: Path2D[] = Array.from({ length: HUES * SHADES }, () => new Path2D());
     const hues = new Float32Array(HUES * SHADES);
     const used = new Uint8Array(HUES * SHADES);
@@ -343,24 +391,25 @@ class ClothSim implements SimulationModel {
 }
 
 export const cloth: ModelDefinition = {
+  // The id stays "cloth" so routes and macros saved under the old Silk curtain name carry over.
   id: "cloth",
-  name: "Silk curtain",
+  name: "Fabric",
   category: "Surfaces",
-  description: "A silk curtain that dances to the music. The spectrum lifts it like an equaliser, bass on the left and treble on the right; kicks blow gusts through it and every note plucks it and dyes it its colour.",
-  hint: "Drag to grab and pull the silk. Right-drag or Shift-drag to slice it; it slowly knits back together.",
+  description: "A sheet of fabric that dances to the music. The spectrum lifts it like an equaliser, bass on the left and treble on the right; kicks blow gusts through it and every note plucks it and dyes it its colour. Anchor any of its four sides.",
+  hint: "Drag to grab and pull the fabric. Right-drag or Shift-drag to slice it; it slowly knits back together.",
   fixedDt: 1 / 60,
   paintsBackground: true,
   params: [
     { kind: "number", key: "spectrumLift", label: "Spectrum lift", min: 0, max: 4, step: 0.05, default: 1.2, group: "Music",
-      description: "How high loud frequencies lift their part of the curtain. High values fling the hem into the air." },
+      description: "How high loud frequencies lift their part of the fabric. High values fling the hem into the air." },
     { kind: "number", key: "billow", label: "Bass billow", min: 0, max: 4, step: 0.05, default: 0.8, group: "Music", global: "energy",
-      description: "How much the bass lifts the whole curtain at once." },
+      description: "How much the bass lifts the whole fabric at once." },
     { kind: "number", key: "punch", label: "Hit punch", min: 0, max: 4, step: 0.05, default: 1, group: "Music", global: "energy",
-      description: "How hard kicks, snares and notes shove the silk." },
+      description: "How hard kicks, snares and notes shove the fabric." },
     gravityModeParam("down"),
     {
       kind: "number", key: "gravity", label: "Gravity strength", min: 0, max: 5000, step: 10, default: 700, group: "Gravity", global: "gravity",
-      description: "How heavy the silk hangs. Low floats like chiffon; very high stretches and rips it.",
+      description: "How heavy the fabric hangs. Low floats like chiffon; very high stretches and rips it.",
     },
     {
       kind: "number", key: "wind", label: "Wind", min: -4000, max: 4000, step: 10, default: 60, group: "Forces", global: "energy",
@@ -380,36 +429,34 @@ export const cloth: ModelDefinition = {
     },
     {
       kind: "number", key: "heal", label: "Healing", min: 0, max: 5, step: 0.05, default: 1, group: "Behaviour",
-      description: "How fast torn silk knits back together. Zero keeps every tear.",
+      description: "How fast torn fabric knits back together. Zero keeps every tear.",
     },
     colourParam("notes"),
     {
       kind: "boolean", key: "threads", label: "Show threads", default: true, group: "Look",
-      description: "Draws the weave as fine glowing lines over the silk; they sparkle with the hi-hats.",
+      description: "Draws the weave as fine glowing lines over the fabric; they sparkle with the hi-hats.",
     },
     ...feedbackParams(0.45, 0, 0),
-    {
-      kind: "choice", key: "pins", label: "Hang from", default: "curtain", resetOnChange: true, group: "Setup",
-      description: "Where the cloth is pinned along its top. Changing it restarts the scene.",
-      options: [
-        { value: "edge", label: "Whole top edge" },
-        { value: "curtain", label: "Curtain rings" },
-        { value: "corners", label: "Two corners" },
-      ],
-    },
+    ...SIDES.map((side): ParamSpec => ({
+      kind: "choice", key: `anchor${side}`, label: `${side} side`, group: "Anchors", options: ANCHOR_OPTIONS,
+      default: side === "Top" ? "rings" : "free",
+      description: side === "Top"
+        ? "How the top edge is held. Rings hang it like a curtain; Free lets that side flap loose."
+        : `How the ${side.toLowerCase()} edge is held. Free lets it flap; anchoring it stretches the fabric out that way.`,
+    })),
     {
       kind: "number", key: "resolution", label: "Resolution", min: 10, max: 90, step: 1, default: 48, resetOnChange: true, group: "Setup",
       description: "How many points across the cloth. Higher is smoother but heavier to run.",
     },
   ],
   macros: [
-    { key: "storm", label: "Storm", description: "A gale whips the silk sideways and every hit slams into it.",
+    { key: "storm", label: "Storm", description: "A gale whips the fabric sideways and every hit slams into it.",
       targets: [{ param: "wind", amount: 0.15 }, { param: "punch", amount: 0.6 }, { param: "stiffness", amount: -0.15 }, { param: "afterglow", amount: 0.2 }] },
-    { key: "float", label: "Weightless", description: "The silk floats up and drifts with the music in a dreamy haze.",
+    { key: "float", label: "Weightless", description: "The fabric floats up and drifts with the music in a dreamy haze.",
       targets: [{ param: "gravity", amount: -0.1 }, { param: "spectrumLift", amount: 0.2 }, { param: "billow", amount: 0.15 }, { param: "afterglow", amount: 0.35 }, { param: "zoom", amount: 0.2 }] },
-    { key: "shred", label: "Shred", description: "Heavy, brittle silk that rips to ribbons on every hit, then knits back together.",
+    { key: "shred", label: "Shred", description: "Heavy, brittle fabric that rips to ribbons on every hit, then knits back together.",
       targets: [{ param: "gravity", amount: 0.12 }, { param: "tearLimit", amount: -0.2 }, { param: "heal", amount: 0.1 }, { param: "punch", amount: 0.4 }, { param: "tearable", set: true, at: 0.1 }] },
-    { key: "vortex", label: "Vortex", description: "Gravity swirls the silk round the centre inside a turning tunnel.",
+    { key: "vortex", label: "Vortex", description: "Gravity swirls the fabric round the centre inside a turning tunnel.",
       targets: [{ param: "afterglow", amount: 0.35 }, { param: "spin", amount: 0.4 }, { param: "zoom", amount: -0.3 }, { param: "gravityMode", set: "swirl", at: 0.3 }] },
   ],
   modulations: [
@@ -421,12 +468,12 @@ export const cloth: ModelDefinition = {
     { source: "kick", text: "A gust that switches side on each kick" },
     { source: "snare", text: "Shakes every point at random" },
     { source: "hat", text: "A flutter along the hem, and the threads sparkle" },
-    { source: "tone", text: "Plucks the silk where the note lands (low left, high right) and dyes it the note's colour" },
+    { source: "tone", text: "Plucks the fabric where the note lands (low left, high right) and dyes it the note's colour" },
     { source: "bassline", text: "A slow swell rolls along the hem" },
-    { source: "chord", text: "Each note of the chord dyes a soft vertical band of silk" },
-    { source: "spectrum", text: "Each frequency lifts its column of silk (Spectrum lift)" },
-    { source: "bass", text: "Lifts the whole curtain (Bass billow)" },
-    { source: "level", text: "The silk glows brighter as the music gets louder" },
+    { source: "chord", text: "Each note of the chord dyes a soft vertical band of fabric" },
+    { source: "spectrum", text: "Each frequency lifts its column of fabric (Spectrum lift)" },
+    { source: "bass", text: "Lifts the whole fabric (Bass billow)" },
+    { source: "level", text: "The fabric glows brighter as the music gets louder" },
     { source: "treble", text: "The threads sparkle" },
   ],
   create: () => new ClothSim(),

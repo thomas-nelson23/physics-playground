@@ -15,6 +15,10 @@ interface Boid {
 }
 
 const HUE_BUCKETS = 24;
+/** Most neighbours a bird pays attention to; see `step`. */
+const MAX_NEIGHBOURS = 40;
+/** Grid cells to search round a bird, as (dx, dy) pairs, its own cell first. */
+const NEIGHBOUR_ORDER = [0, 0, -1, 0, 1, 0, 0, -1, 0, 1, -1, -1, 1, -1, -1, 1, 1, 1];
 
 /**
  * A murmuration of light streaks. Underneath it is Reynolds' boids
@@ -35,6 +39,9 @@ class BoidsSim implements SimulationModel {
   private fb = new Feedback();
   private stepped = false;
   private time = 0;
+  /** Spatial grid: first bird in each cell, and the next bird in the same cell. */
+  private head = new Int32Array(0);
+  private next = new Int32Array(0);
 
   reset(view: Viewport, p: ParamValues): void {
     this.view = view;
@@ -68,36 +75,47 @@ class BoidsSim implements SimulationModel {
     const [ugx, ugy] = isUniform(gMode) ? gravityAt(gMode, gStrength, 0, 0, width, height, this.time) : [0, 0];
     this.scatter = p.scatter as number;
 
+    // Bin the birds into a grid of vision-radius cells, as linked lists in typed arrays
+    // (no per-step allocations, so no garbage-collector hitches).
+    const boids = this.boids, count = boids.length;
     const cell = Math.max(radius, 8);
-    const cols = Math.ceil(width / cell) + 1;
-    const grid = new Map<number, Boid[]>();
-    for (const b of this.boids) {
-      const k = Math.floor(b.y / cell) * cols + Math.floor(b.x / cell);
-      const list = grid.get(k);
-      if (list) list.push(b);
-      else grid.set(k, [b]);
+    const cols = Math.ceil(width / cell) + 1, rows = Math.ceil(height / cell) + 1;
+    if (this.head.length < cols * rows) this.head = new Int32Array(cols * rows);
+    if (this.next.length < count) this.next = new Int32Array(count);
+    const head = this.head, next = this.next;
+    head.fill(-1, 0, cols * rows);
+    for (let i = 0; i < count; i++) {
+      const b = boids[i];
+      const cx = Math.min(cols - 1, Math.max(0, Math.floor(b.x / cell)));
+      const cy = Math.min(rows - 1, Math.max(0, Math.floor(b.y / cell)));
+      const k = cy * cols + cx;
+      next[i] = head[k];
+      head[k] = i;
     }
 
-    for (const b of this.boids) {
+    for (const b of boids) {
       let ax = 0, ay = 0, cx = 0, cy = 0, sx = 0, sy = 0, n = 0, hx = 0, hy = 0;
-      const gx = Math.floor(b.x / cell);
-      const gy = Math.floor(b.y / cell);
-      for (let oy = -1; oy <= 1; oy++) {
-        for (let ox = -1; ox <= 1; ox++) {
-          const list = grid.get((gy + oy) * cols + gx + ox);
-          if (!list) continue;
-          for (const o of list) {
-            if (o === b) continue;
-            const dx = o.x - b.x;
-            const dy = o.y - b.y;
-            const d2 = dx * dx + dy * dy;
-            if (d2 > r2) continue;
-            n++;
-            ax += o.vx; ay += o.vy;
-            hx += o.hx; hy += o.hy;
-            cx += o.x; cy += o.y;
-            if (d2 < sepR2 && d2 > 0) { sx -= dx / d2; sy -= dy / d2; }
-          }
+      const gx = Math.min(cols - 1, Math.max(0, Math.floor(b.x / cell)));
+      const gy = Math.min(rows - 1, Math.max(0, Math.floor(b.y / cell)));
+      // Like real starlings, each bird only heeds a limited number of neighbours. Without
+      // the cap a big vision radius over a tight flock checks every bird against every
+      // other and the frame rate collapses. The bird's own cell is searched first.
+      for (let c = 0; c < 9 && n < MAX_NEIGHBOURS; c++) {
+        const ox = NEIGHBOUR_ORDER[c * 2], oy = NEIGHBOUR_ORDER[c * 2 + 1];
+        const x = gx + ox, y = gy + oy;
+        if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
+        for (let j = head[y * cols + x]; j !== -1 && n < MAX_NEIGHBOURS; j = next[j]) {
+          const o = boids[j];
+          if (o === b) continue;
+          const dx = o.x - b.x;
+          const dy = o.y - b.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > r2) continue;
+          n++;
+          ax += o.vx; ay += o.vy;
+          hx += o.hx; hy += o.hy;
+          cx += o.x; cy += o.y;
+          if (d2 < sepR2 && d2 > 0) { sx -= dx / d2; sy -= dy / d2; }
         }
       }
       let fx = 0, fy = 0;
@@ -243,7 +261,7 @@ class BoidsSim implements SimulationModel {
       if (b.spark > 0.1) sparks.rect(b.x - 1.5 * z, b.y - 1.5 * z, 3 * z, 3 * z);
     }
     g.globalCompositeOperation = "lighter";
-    g.lineCap = "round";
+    g.lineCap = "butt";
     g.lineWidth = 1.6 * z;
     for (let i = 0; i < HUE_BUCKETS; i++) {
       g.strokeStyle = `hsla(${(i + 0.5) * (360 / HUE_BUCKETS)} 90% ${light}% / 0.5)`;
