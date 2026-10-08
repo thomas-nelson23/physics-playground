@@ -26,7 +26,7 @@ fn new_input(name: &str) -> Result<MidiInput, String> {
 /// Names of the MIDI inputs currently plugged in.
 #[tauri::command]
 pub fn midi_inputs() -> Result<Vec<String>, String> {
-    let input = new_input("Physics Playground (scan)")?;
+    let input = new_input("Tonefield (scan)")?;
     Ok(input
         .ports()
         .iter()
@@ -41,7 +41,7 @@ pub fn midi_connect(app: AppHandle, state: State<MidiState>, name: String) -> Re
     if connections.contains_key(&name) {
         return Ok(());
     }
-    let mut input = new_input("Physics Playground")?;
+    let mut input = new_input("Tonefield")?;
     // Clock and active-sensing bytes arrive dozens of times a second and the
     // app doesn't use them, so don't forward them across the IPC bridge.
     input.ignore(Ignore::SysexAndTime);
@@ -54,7 +54,7 @@ pub fn midi_connect(app: AppHandle, state: State<MidiState>, name: String) -> Re
     let connection = input
         .connect(
             &port,
-            "physics-playground-in",
+            "tonefield-in",
             move |_stamp, data, _| {
                 let _ = app.emit(
                     "midi-message",

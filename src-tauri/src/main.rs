@@ -10,5 +10,5 @@ fn main() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
-    physics_playground_lib::run()
+    tonefield_lib::run()
 }

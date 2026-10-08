@@ -1,11 +1,11 @@
 [package]
-name = "physics-playground"
+name = "tonefield"
 version = "0.1.0"
 description = "Interactive physics and algorithm visualizer"
 edition = "2021"
 
 [lib]
-name = "physics_playground_lib"
+name = "tonefield_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
