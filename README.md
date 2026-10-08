@@ -1,4 +1,4 @@
-# Physics Playground
+# Tonefield
 
 A music-driven visualizer for the desktop. Each model is a physics or algorithmic system tuned to make striking visuals that move with the music: a built-in generative sequencer, a MIDI controller, or a song drives every model through its notes, its spectrum and loudness, macros and modulation. Pick a model, tweak it with sliders, and poke at it with the mouse.
 
@@ -75,15 +75,15 @@ The repo ships a [`PKGBUILD`](packaging/arch/PKGBUILD) that builds the app from 
 
 ```sh
 sudo pacman -S --needed base-devel git
-git clone https://github.com/thomas-nelson23/physics-playground.git
-cd physics-playground/packaging/arch
+git clone https://github.com/thomas-nelson23/tonefield.git
+cd tonefield/packaging/arch
 makepkg -si
 ```
 
-`makepkg -s` pulls in everything it needs (Rust, Node, `webkit2gtk-4.1`). If you already use `rustup`, that works too. Then launch **Physics Playground** from your app menu, or run `physics-playground`.
+`makepkg -s` pulls in everything it needs (Rust, Node, `webkit2gtk-4.1`). If you already use `rustup`, that works too. Then launch **Tonefield** from your app menu, or run `tonefield`.
 
 - Update: `git pull`, then `makepkg -sif` in `packaging/arch`.
-- Uninstall: `sudo pacman -R physics-playground`.
+- Uninstall: `sudo pacman -R tonefield`.
 
 The repo is private, so `git clone` needs you signed in to GitHub (for example `gh auth login`, or clone over SSH).
 
@@ -91,16 +91,16 @@ The repo is private, so `git clone` needs you signed in to GitHub (for example `
 
 Every push to `main` builds an Arch package in CI.
 
-1. Open the repo's **Actions** tab, pick the latest **Build** run on `main`, and download the `physics-playground-arch` artifact.
+1. Open the repo's **Actions** tab, pick the latest **Build** run on `main`, and download the `tonefield-arch` artifact.
 2. Unzip it and install:
 
    ```sh
-   sudo pacman -U physics-playground-*.pkg.tar.zst
+   sudo pacman -U tonefield-*.pkg.tar.zst
    ```
 
 ### AppImage (no install)
 
-The `physics-playground-Linux` artifact from the same run contains an AppImage that runs without installing anything. It needs FUSE 2:
+The `tonefield-Linux` artifact from the same run contains an AppImage that runs without installing anything. It needs FUSE 2:
 
 ```sh
 sudo pacman -S --needed fuse2
@@ -112,7 +112,7 @@ The AppImage is built on Ubuntu and bundles its own libraries, so the pacman pac
 
 ### Troubleshooting
 
-- **Blank or white window, or a crash on start (common with NVIDIA drivers):** the app now sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` itself on Linux, so this should not happen. If you need the DMA-BUF renderer back, launch with `WEBKIT_DISABLE_DMABUF_RENDERER=0 physics-playground`.
+- **Blank or white window, or a crash on start (common with NVIDIA drivers):** the app now sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` itself on Linux, so this should not happen. If you need the DMA-BUF renderer back, launch with `WEBKIT_DISABLE_DMABUF_RENDERER=0 tonefield`.
 
 ## Adding a model
 

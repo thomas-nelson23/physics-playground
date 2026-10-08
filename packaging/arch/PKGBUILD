@@ -1,14 +1,18 @@
-# Builds Physics Playground from this checkout and installs it as a pacman package.
+# Builds Tonefield from this checkout and installs it as a pacman package.
 #   cd packaging/arch && makepkg -si
 # Works on Arch and Arch-based distros (CachyOS, EndeavourOS, Manjaro, ...).
 
-pkgname=physics-playground
+pkgname=tonefield
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Interactive physics and algorithm visualizer"
+pkgdesc="Music-driven visualizer"
 arch=('x86_64' 'aarch64')
-url="https://github.com/thomas-nelson23/physics-playground"
+url="https://github.com/thomas-nelson23/tonefield"
 license=('custom')
+# Formerly physics-playground: installing this removes the old package
+provides=('physics-playground')
+conflicts=('physics-playground')
+replaces=('physics-playground')
 depends=('webkit2gtk-4.1' 'gtk3' 'glib2' 'cairo' 'pango' 'gdk-pixbuf2' 'libsoup3' 'alsa-lib' 'hicolor-icon-theme')
 makedepends=('cargo' 'nodejs' 'npm' 'git')
 # makepkg's LTO flags break Rust/C mixed builds; debug split adds nothing here
@@ -40,12 +44,12 @@ package() {
   install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/$pkgname.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
-Name=Physics Playground
+Name=Tonefield
 Comment=$pkgdesc
 Exec=$pkgname
 Icon=$pkgname
 Terminal=false
-Categories=Education;Science;Physics;
+Categories=AudioVideo;Audio;Graphics;
 DESKTOP
 
   install -Dm644 src-tauri/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/$pkgname.png"

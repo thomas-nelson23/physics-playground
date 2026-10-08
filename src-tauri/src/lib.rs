@@ -10,5 +10,5 @@ pub fn run() {
             midi::midi_disconnect,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Physics Playground");
+        .expect("error while running Tonefield");
 }
