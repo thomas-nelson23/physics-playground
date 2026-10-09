@@ -103,7 +103,6 @@ input[type="range"]::-moz-range-track { height: 2px; background: var(--track); b
 input[type="range"]::-moz-range-thumb { width: 10px; height: 10px; border-radius: 50%; background: var(--thumb); border: 1px solid #111; }
 
 label.check { display: inline-flex; align-items: center; gap: 6px; }
-label.inline { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
 .readout { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
 
 /* ---- Options bar ---- */
