@@ -168,6 +168,11 @@ canvas.addEventListener("pointerdown", (e) => {
 canvas.addEventListener("pointermove", (e) => sendPointer("move", e));
 canvas.addEventListener("pointerup", (e) => sendPointer("up", e));
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+// The webview's own right-click menu (Back, Reload, Print on Windows) only gets
+// in the way; text fields keep theirs for copy and paste.
+document.addEventListener("contextmenu", (e) => {
+  if (!(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) e.preventDefault();
+});
 
 /** Pausing the simulation pauses the music too, and playing resumes whatever was playing. */
 function setRunning(value: boolean): void {

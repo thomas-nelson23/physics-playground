@@ -4,7 +4,7 @@ A music-driven visualizer for the desktop. Each model is a physics or algorithmi
 
 ![The visualizer playing along with the sequencer](docs/screenshot.png)
 
-Built with [Tauri 2](https://tauri.app) (Rust shell, native webview) and TypeScript + Canvas 2D. macOS is the first target; Linux builds from the same code (`.deb`, AppImage, and a pacman package for Arch-based distros like CachyOS).
+Built with [Tauri 2](https://tauri.app) (Rust shell, native webview) and TypeScript + Canvas 2D. macOS is the first target; Linux (`.deb`, AppImage, and a pacman package for Arch-based distros like CachyOS) and Windows 10/11 (an `.exe` installer) build from the same code.
 
 ## Models
 
@@ -39,7 +39,7 @@ The panel under the canvas has four tabs.
 
 Every model also reacts to the music by itself: to each kind of note, and continuously to the sound's bass, loudness, spectrum and waveform. The Modulation tab lists each of these **built-in reactions** with a live meter and a switch to turn it off. The **Intensity** slider there scales them along with every route, and **Music drives the visuals** turns them all off. Each model also has a few **macros**: single 0..1 knobs that push several parameters at once. Routes, macro settings and switched-off reactions are saved per model.
 
-MIDI goes through the Rust side ([`src-tauri/src/midi.rs`](src-tauri/src/midi.rs), using `midir`) because the Linux and macOS webviews don't support Web MIDI. Messages reach the UI as `midi-message` events. On Linux that needs ALSA (`alsa-lib` on Arch, `libasound2-dev` to build on Debian/Ubuntu). In a plain browser (`npm run dev`) the app falls back to Web MIDI where the browser has it.
+MIDI goes through the Rust side ([`src-tauri/src/midi.rs`](src-tauri/src/midi.rs), using `midir`) because the Linux and macOS webviews don't support Web MIDI (on Windows it uses the same path, through the system's WinMM MIDI). Messages reach the UI as `midi-message` events. On Linux that needs ALSA (`alsa-lib` on Arch, `libasound2-dev` to build on Debian/Ubuntu). In a plain browser (`npm run dev`) the app falls back to Web MIDI where the browser has it.
 
 ## Running it
 
@@ -54,7 +54,7 @@ npm run dev           # or just the UI in a browser at http://localhost:1420
 Build a distributable:
 
 ```sh
-npm run tauri build   # macOS: .app + .dmg   Linux: .deb + .AppImage
+npm run tauri build   # macOS: .app + .dmg   Linux: .deb + .AppImage   Windows: setup .exe
 ```
 
 On Linux, install the webview deps first:
@@ -113,6 +113,17 @@ The AppImage is built on Ubuntu and bundles its own libraries, so the pacman pac
 ### Troubleshooting
 
 - **Blank or white window, or a crash on start (common with NVIDIA drivers):** the app now sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` itself on Linux, so this should not happen. If you need the DMA-BUF renderer back, launch with `WEBKIT_DISABLE_DMABUF_RENDERER=0 tonefield`.
+
+## Installing on Windows 10/11
+
+Every push to `main` builds a Windows installer in CI.
+
+1. Open the repo's **Actions** tab, pick the latest **Build** run on `main`, and download the `tonefield-Windows` artifact.
+2. Unzip it and run `nsis/Tonefield_<version>_x64-setup.exe`. It installs for your user only, so it needs no admin rights, and adds Start menu and uninstall entries.
+
+The installer isn't code-signed, so Windows SmartScreen says "Windows protected your PC" the first time: click **More info**, then **Run anyway**. The app runs on Microsoft Edge WebView2, which Windows 11 and up-to-date Windows 10 already have; if it's missing, the installer downloads it.
+
+To build it yourself on Windows, install Node, Rust (via rustup, with the MSVC toolchain) and the Visual Studio C++ Build Tools ([Tauri's Windows prerequisites](https://tauri.app/start/prerequisites/#windows)), then run `npm install` and `npm run tauri build -- --bundles nsis`. The installer lands in `src-tauri/target/release/bundle/nsis/`.
 
 ## Adding a model
 
