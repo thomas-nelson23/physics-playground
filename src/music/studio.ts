@@ -43,6 +43,9 @@ interface ModelSettings {
   muted: ReactionSource[];
 }
 
+/** The global controls a route can push. */
+const GLOBAL_NUMBERS = GLOBAL_SPECS.filter((p): p is NumberSpec => p.kind === "number");
+
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 const choices = (rec: Record<string, { label: string }>) => Object.entries(rec).map(([value, o]) => ({ value, label: o.label }));
 const BASS_RANGE_LABELS = ["Root only", "+ octave", "+ fifth", "+ third", "+ low fifth", "+ seventh", "+ passing"];
@@ -185,6 +188,8 @@ export class Studio {
   private learning = false;
   private learnTarget: string | null = null;
   private ledTimer = 0;
+  /** The last value a MIDI knob gave each model parameter, so the model only rebuilds when a knob actually changes it. */
+  private lastCcValue: ParamValues = {};
   private seqControls: ParamControls[] = [];
   private ringCtx: CanvasRenderingContext2D | null = null;
   private melodyCtx: CanvasRenderingContext2D | null = null;
@@ -267,7 +272,7 @@ export class Studio {
     return [
       ...(this.def.macros ?? []).map((m) => ({ id: `macro:${m.key}`, label: `Macro: ${m.label}` })),
       ...modulatable(this.def).map((p) => ({ id: p.key, label: p.label })),
-      ...globalNumbers().map((p) => ({ id: `global:${p.key}`, label: `Global: ${p.label}` })),
+      ...GLOBAL_NUMBERS.map((p) => ({ id: `global:${p.key}`, label: `Global: ${p.label}` })),
     ];
   }
 
@@ -372,7 +377,7 @@ export class Studio {
     if (depth > 0) {
       for (const r of this.modelSettings.routes) {
         if (r.off || !r.target.startsWith("global:")) continue;
-        const spec = globalNumbers().find((p) => p.key === r.target.slice(7));
+        const spec = GLOBAL_NUMBERS.find((p) => p.key === r.target.slice(7));
         const src = this.sources.get(r.source);
         if (!spec || src === 0) continue;
         g[spec.key] = Math.min(spec.max, Math.max(spec.min, (g[spec.key] as number) + r.amount * src * depth * (spec.max - spec.min)));
@@ -504,7 +509,6 @@ export class Studio {
       this.onBaseChanged(spec);
     }
   }
-  private lastCcValue: ParamValues = {};
 
   private setLearning(on: boolean): void {
     this.learning = on;
@@ -554,13 +558,13 @@ export class Studio {
     const box = $("midi-bindings");
     box.replaceChildren();
     const rows = Object.entries(this.settings.bindings)
-      .map(([cc, t]) => [cc, t, this.bindingLabel(t)] as const)
-      .filter(([, , label]) => label !== null);
+      .map(([cc, t]) => [cc, this.bindingLabel(t)] as const)
+      .filter(([, label]) => label !== null);
     if (rows.length === 0) {
       box.append(el("p", { className: "muted", textContent: "No knobs mapped for this model yet. Macro and global mappings carry over to every model." }));
       return;
     }
-    for (const [cc, target, label] of rows) {
+    for (const [cc, label] of rows) {
       const remove = el("button", { type: "button", textContent: "Remove", className: "small" });
       remove.addEventListener("click", () => {
         delete this.settings.bindings[cc];
@@ -568,7 +572,6 @@ export class Studio {
         this.renderBindings();
       });
       box.append(el("div", { className: "binding" }, el("span", { textContent: `CC ${cc}` }), el("span", { textContent: `→ ${label}` }), remove));
-      void target;
     }
   }
 
@@ -862,17 +865,11 @@ export class Studio {
   private setGen(key: string, v: number): void {
     const found = findSeqSpec(key);
     if (!found) return;
-    const spec = found.spec;
     const values = this.settings.seq as unknown as ParamValues;
-    if (spec.kind === "number") {
-      const value = Math.round((spec.min + v * (spec.max - spec.min)) / spec.step) * spec.step;
-      values[key] = Math.min(spec.max, Math.max(spec.min, value));
-    } else if (spec.kind === "choice") {
-      const next = spec.options[Math.min(spec.options.length - 1, Math.floor(v * spec.options.length))].value;
-      if (next === values[key]) return;
-      values[key] = next;
-      if (key === "chordStyle") this.seq.refreshHarmony();
-    } else return;
+    const next = knobValue(found.spec, v);
+    if (found.spec.kind === "choice" && next === values[key]) return;
+    values[key] = next;
+    if (key === "chordStyle") this.seq.refreshHarmony();
     this.seq.version++;
     this.refreshSeqControls();
     this.saveGlobal();
@@ -1215,10 +1212,6 @@ export class Studio {
   }
 }
 
-/** The global controls a route can push. */
-function globalNumbers(): NumberSpec[] {
-  return GLOBAL_SPECS.filter((p): p is NumberSpec => p.kind === "number");
-}
 
 /** A control's value for a 0..1 knob position (MIDI CC): numbers snap to their step, dropdowns pick by slice. */
 function knobValue(spec: ParamSpec, v: number): number | boolean | string {

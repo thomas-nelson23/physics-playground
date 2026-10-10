@@ -6,7 +6,8 @@ edition = "2021"
 
 [lib]
 name = "tonefield_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop only: the staticlib/cdylib types Tauri templates add are for mobile builds
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -14,5 +15,12 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 midir = "0.10"
+
+# A smaller binary. The app's Rust side only forwards MIDI, so it gives up no
+# speed that matters; panics still unwind, as before.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

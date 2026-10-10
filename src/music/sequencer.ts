@@ -229,12 +229,9 @@ export function sanitizeState(saved: unknown): SequencerState {
   if (!(s.style in STYLES)) s.style = "broken";
   const num = s as unknown as Record<string, number>;
   const str = s as unknown as Record<string, string>;
-  // Saves from before drum lengths turned a ring relative to the style's placement; the offset now includes it.
-  const old = !("kickLength" in (saved as Record<string, unknown>));
   for (const d of DRUMS) {
     const len = (num[`${d.key}Length`] = Math.max(1, Math.min(MAX_DRUM_LENGTH, Math.round(num[`${d.key}Length`]))));
-    const rot = Math.round(num[`${d.key}Rotate`]) + (old ? STYLES[s.style].rotate[d.key] : 0);
-    num[`${d.key}Rotate`] = mod(rot, len);
+    num[`${d.key}Rotate`] = mod(Math.round(num[`${d.key}Rotate`]), len);
     if (!DRUM_RESETS.some((r) => r.value === str[`${d.key}Reset`])) str[`${d.key}Reset`] = "0";
   }
   if (!(s.scale in SCALES)) s.scale = "minorPent";
@@ -550,7 +547,7 @@ export class Sequencer {
     const r = this.rng;
     if (!this.held("drums")) {
       DRUMS.forEach((d, i) => {
-        const v = this.drumVariation(d.key);
+        const v = this.num(`${d.key}Variation`);
         const dv = { nudge: 0, ghost: new Map<number, number>(), drop: new Set<number>() };
         const len = this.length(d.key);
         const start = this.rotation(d.key);
@@ -635,10 +632,6 @@ export class Sequencer {
     return since % this.length(key);
   }
 
-  private drumVariation(key: DrumKey): number {
-    return this.num(`${key}Variation`);
-  }
-
   /** The bare euclidean pattern of a track, without this bar's variations. */
   basePattern(i: number): boolean[] {
     const d = DRUMS[i];
@@ -654,7 +647,7 @@ export class Sequencer {
     const d = DRUMS[i];
     const style = STYLES[this.state.style] ?? STYLES.broken;
     const dv = this.drumVar[i];
-    const base = euclid(this.pulses(d.key), this.length(d.key), this.rotation(d.key));
+    const base = this.basePattern(i);
     const level = style.level;
     if (fill && step >= 12 && d.key !== "kick" && this.pulses(d.key) > 0) {
       // Rolls build through the last beat.
